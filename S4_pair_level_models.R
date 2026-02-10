@@ -99,6 +99,8 @@ print(rep_neglect)
 plot(rep_neglect) # Distribution of the repeatability R
 
 
+
+
 #analysis if neglect influences incubarion durarion
 
 # 9. Pair-season-level analysis using total_neglected_seconds
@@ -147,3 +149,27 @@ cor_results <- list(
 
 print(cor_results)
 
+
+# 11. Repreatability of incubation duration of pairs?
+pair_season_summary <- merged_filtered %>%
+  group_by(Pair_ID, Season) %>%
+  summarise(
+    Incubation_Duration = mean(Incubation_Duration, na.rm = TRUE),  # or first(), same if constant within season
+    .groups = "drop"
+  )
+
+pair_season_summary <- pair_season_summary %>%
+  filter(Incubation_Duration != "NaN")
+
+library(rptR)
+
+rpt_pair_season <- rpt(
+  Incubation_Duration ~ (1 | Pair_ID),
+  grname = "Pair_ID",
+  data = pair_season_summary,
+  datatype = "Gaussian",
+  nboot = 1000,
+  npermut = 1000
+)
+
+summary(rpt_pair_season)

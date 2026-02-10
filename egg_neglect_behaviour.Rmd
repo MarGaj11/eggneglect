@@ -1,0 +1,693 @@
+---
+title: "Egg neglect behaviour in biparental seabird, the Little Auk *Alle alle*"
+subtitle: "Supplementary Materials: Descriptive Statistics & Sensitivity Analysis"
+author: "user Gajzmer"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    theme: cosmo
+---
+
+# Pair - COINr method Neglect Index (NI) 
+
+I made a composite indicator out of those variables: 
+
+"total_neglected_minutes", "average_neglect_duration", "total_both_nest",
+
+giving them those weights <- c(1, 1, 0.5) 
+
+
+```{r basic1, echo=FALSE, warning=FALSE, message=FALSE}
+
+library(readxl)
+library(lubridate)
+library(ggthemes)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(ggimage)
+
+setwd("C:/Users/Martyna/Dropbox/Negotiation/NI_files")
+data <- read.csv("./COINr_NI.csv", sep=";", header=TRUE) # If semicolon-separated
+data <- data[, -1]
+colnames(data)[1:3] <- c("Season", "session", "Nest")
+data$Season <- as.character(data$Season)
+
+
+# Load the Excel file with hatching date information
+hatch_data <- read_excel("C:/Users/Martyna/Dropbox/Hornsund metabase/Hornsund/SHO_LIAK_phenology_productivity.xlsx") %>%
+  select(Season, Nest, Lay_day, Hatch_day)  # Select only needed columns
+
+# Merge (join) the data based on "season" and "nest"
+merged_data <- data %>%
+  left_join(hatch_data, by = c("Season", "Nest"))
+
+# Load your updated dataset
+date_data <- readRDS("./DPA_d05_status_activity data.rds")
+
+date_data$session_start <- as.POSIXct(gsub("\\.", "-", date_data$session_start))
+date_data$session_end   <- as.POSIXct(gsub("\\.", "-", date_data$session_end))
+
+date_data <- date_data %>%
+  mutate(Mean_Date = as.POSIXct((as.numeric(session_start) + as.numeric(session_end)) / 2, origin = "1970-01-01")  # Obliczenie średniej daty
+  )
+
+# Select only relevant columns
+date_data <- date_data %>%
+  select(season, session, nest, Mean_Date)
+
+colnames(date_data)<- c("Season", "session", "Nest", "mean_date")
+
+date_data <- date_data %>%
+  mutate(Julian_Date_point = yday(mean_date))
+
+date_data <- date_data %>%
+  distinct() 
+
+date_data$Season <- as.character(date_data$Season)
+
+# Merge with your updated dataset
+df <- merged_data %>%
+  left_join(date_data, by = c("Season","session", "Nest"))
+
+# Calculate incubation duration
+df <- df %>%
+  mutate(NI = as.numeric(gsub(",", ".", NI)),  # Replace commas with dots
+         Incubation_Duration = Hatch_day - Lay_day,
+         Days_to_Hatch = Hatch_day - Julian_Date_point)
+
+# Add year column if not already present
+df$Season <- as.factor(df$Season)  
+
+df <- df %>%
+  filter(!is.na(df$Days_to_Hatch))
+
+n_counts <- df %>%
+  group_by(Season) %>%
+  summarise(n = n())
+
+legend_labels <- setNames(
+  paste0(n_counts$Season, " (n=", n_counts$n, ")"),
+  n_counts$Season
+)
+
+
+
+##
+p <- ggplot(df, aes(x = Days_to_Hatch, y = NI, color = as.factor(Season))) +
+  geom_point(alpha = 0.6, size = 2.5) +
+  geom_smooth(method = "lm", se = TRUE, span = 2, aes(fill = as.factor(Season)), alpha = 0.15) +
+  scale_x_reverse(breaks = seq(0, 30, by = 5)) +
+  # Harmonious color palette with better contrast
+  scale_color_manual(
+    values = c("2019" = "#A50026", "2021" = "#A6D96A", "2023" = "#006837", "2020" = "#FDAE61", "2025" = "#313695"),
+    labels = legend_labels
+  ) +
+  scale_fill_manual(
+    values = c("2019" = "#A50026", "2021" = "#A6D96A", "2023" = "#006837", "2020" = "#FDAE61", "2025" = "#313695"),
+    labels = legend_labels
+  ) +
+  labs(
+    x = "Number of days before hatching",
+    y = "Neglect Index (NI)",
+    color = "Season",
+    fill = "Season"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    # Custom fonts for axis labels
+    axis.title.x = element_text(
+      size = 14, 
+      face = "bold",
+      family = "sans",
+      color = "gray20"
+    ),
+    axis.title.y = element_text(
+      size = 14, 
+      face = "bold",
+      family = "sans",
+      color = "gray20"
+    ),
+    # Custom font for axis text
+    axis.text = element_text(
+      size = 12,
+      family = "sans",
+      color = "gray30"
+    ),
+    # Custom font for legend
+    legend.title = element_text(
+      size = 12,
+      face = "bold",
+      family = "sans",
+      color = "gray20"
+    ),
+    legend.text = element_text(
+      size = 10,
+      family = "sans",
+      color = "gray30"
+    ),
+    # Clean grid
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    # Enhanced plot appearance
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "gray98", color = NA)
+  )
+
+p
+```
+
+# Sex differences - COINr method Neglect Index (NI) in time 
+
+```{r basic2, echo=FALSE, warning=FALSE, message=FALSE}
+# Wyczyść środowisko
+rm(list = ls())
+
+# 1. Załadowanie wymaganych bibliotek
+library(dplyr)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(readxl)
+library(lme4)
+
+############### stabilność konkretnych osobników
+
+
+setwd("C:/Users/Martyna/Dropbox/Negotiation/NI_files")
+data <- read.csv("./Ind_neglect_Julian_Date.csv", sep=";", header=TRUE)
+
+pair_ID <- read_excel("C:/Users/Martyna/Dropbox/Hornsund metabase/Hornsund/SHO_LIAK_capturing.xlsx", guess_max = 10000)
+pair_ID <- pair_ID %>% filter (!Age == "1") %>%
+  select(Nest, RingNo, R_leg, L_leg,  Sx, Season, Wing, THL) 
+
+hatch <- read.csv("./Julian_Date_COINr_NI.csv", sep=";", header=TRUE)
+hatch <- hatch %>%
+  mutate(Season_Nest = paste(Season, Nest, sep = "_"))
+
+data <- data %>%
+  select(Season_Nest, nest, season, ringno, session, sx, NI, Partner_ringno
+         , Partner_Neglect, log_NI) %>%
+  left_join(
+    hatch %>% select(Season_Nest, session, Days_to_Hatch),
+    by = c("Season_Nest", "session")
+  )
+
+data <- data %>%
+  mutate(Season = season) %>%
+  mutate(Nest = nest) %>%
+  mutate(Sx = sx)
+
+pair_ID <- pair_ID %>%
+  mutate(Season_Nest = paste(Season, Nest, sep = "_"))
+
+merged <- data %>%
+  select(Season_Nest, Season, Nest, session, Sx, NI, Days_to_Hatch,Partner_ringno
+         , Partner_Neglect, log_NI) %>%
+  left_join(
+    pair_ID %>% select(RingNo, Sx, Season_Nest, Season),
+    by = c("Season_Nest", "Sx", "Season")
+  )
+
+merged<- merged %>%
+  distinct(Season_Nest, Sx, RingNo, session, .keep_all = TRUE)
+
+
+merged <- merged %>%
+  mutate(
+    Season = as.factor(Season),
+    session = as.factor(session),
+    Sx = as.factor(Sx),
+    log_NI = as.numeric(gsub(",", ".", log_NI)),
+    NI = as.numeric(gsub(",", ".", NI)),
+    Partner_Neglect = as.numeric(gsub(",", ".", Partner_Neglect)),
+  )
+
+
+colors <- c("2019" = "#A50026",
+            "2020" = "#FDAE61",
+            "2021" = "#A6D96A",
+            "2023" = "#006837",
+            "2023" = "darkgrey",
+            "2025" = "#313695")
+
+all_colors <- c(colors)
+
+sex_labels <- data.frame(
+  Sx = c("f", "m"),
+  label = c("\u2640", "\u2642")
+)
+
+sex_labels <- data.frame(
+  Sx = c("f", "m"),
+  label = c("\u2640", "\u2642"),  # symbole ♀ i ♂
+  x = c(0, 0),   # wpisz ręcznie pozycję na osi X (skala odwrócona)
+  y = c(90, 90)    # wpisz ręcznie pozycję na osi Y
+)
+
+# Calculate sample sizes per season
+sample_sizes <- merged %>%
+  group_by(Season) %>%
+  summarise(n = n()/2) %>%  # divide by 2 since you have 2 sexes with equal n
+  ungroup()
+
+# Create new labels with sample sizes
+season_labels <- setNames(
+  paste0(sample_sizes$Season, " (n = ", sample_sizes$n, ")"),
+  sample_sizes$Season
+)
+
+
+p <- ggplot(merged, aes(x = Days_to_Hatch, y = NI)) +
+  geom_point(aes(color = Season), alpha = 0.6, size = 2.5) +
+  geom_smooth(aes(color = Season, fill = Season),
+              method = "lm", se = TRUE, alpha = 0.15) +
+  scale_x_reverse(breaks = seq(0, 30, by = 5)) +
+  scale_color_manual(values = all_colors, labels = season_labels) +
+  scale_fill_manual(values = all_colors, labels = season_labels) +
+  labs(
+    x = "Number of days before hatching",
+    y = "Neglect Index (NI)"
+  ) +
+  
+  # Facetowanie bez stripów
+  facet_wrap(~Sx) +
+  
+  # Dodanie symboli płci w ręcznie ustawionych pozycjach
+  geom_text(
+    data = sex_labels,
+    aes(x = x, y = y, label = label),
+    hjust = 1, vjust = 1,
+    fontface = "bold",
+    size = 12,
+    color = "black",
+    inherit.aes = FALSE
+  ) +
+  
+  # Styl strict journal
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "right",
+    
+    axis.title = element_text(size = 13, face = "plain", color = "black"),
+    axis.text = element_text(size = 11, color = "black"),
+    
+    panel.grid = element_blank(),
+    
+    panel.border = element_rect(color = "black", linewidth = 0.5),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    
+    # Usuwamy stripy
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10)
+  )
+
+# --- Wyświetlenie wykresu ---
+p
+```
+```{r basic3, echo=FALSE, warning=FALSE, message=FALSE, include = FALSE}
+# 1. Wyczyść środowisko i załaduj biblioteki
+rm(list = ls())
+
+library(rptR)
+library(lme4)
+library(DHARMa)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(performance)
+library(glmmTMB)
+
+# 2. Wczytywanie danych (oryginalne ścieżki i nazwy)
+setwd("C:/Users/Martyna/Dropbox/Negotiation/NI_files")
+data <- read.csv("./COINr_Individual_NI.csv", sep=";", header=TRUE)
+hatch <- read.csv("./Julian_Date_COINr_NI.csv", sep=";", header=TRUE)
+
+# 3. Przygotowanie danych i łączenie
+hatch <- hatch %>%
+  mutate(Season_Nest = paste(Season, Nest, sep = "_"))
+
+data <- data %>%
+  select(Season_Nest, nest, season, ringno, session, sx, NI, mean_incubation_duration) %>%
+  left_join(
+    hatch %>% select(Season_Nest, session, Days_to_Hatch, Incubation_Duration),
+    by = c("Season_Nest", "session")
+  )
+
+partner_data <- data %>%
+  select(season, nest, session, 
+         Partner_ringno = ringno, 
+         Partner_Sx = sx, 
+         Partner_Neglect = NI,
+         Partner_Incubation = mean_incubation_duration)
+
+data <- data %>%
+  left_join(partner_data, by = c("season", "nest", "session")) %>%
+  filter(sx != Partner_Sx) %>%
+  select(-Partner_Sx)
+
+# 4. Czyszczenie danych
+fix_num <- function(x) as.numeric(gsub(",", ".", x))
+
+data <- data %>%
+  mutate(
+    NI = fix_num(NI),
+    t = (31 - as.numeric(Days_to_Hatch)) / 31,
+    log_NI = log(NI + 0.0001),     
+    NI_plus = NI + 0.01,           
+    session = as.factor(session),
+    season = as.factor(season),
+    ringno = as.factor(ringno),
+    Partner_ringno = as.factor(Partner_ringno)
+  )
+
+# Podział na płcie
+data_female <- data %>% filter(sx == "f")
+data_male <- data %>% filter(sx == "m")
+
+# --- 5. MODEL COMPARISON: GLMM Gamma wygrywa (AIC) ---
+m_lm   <- lm(log_NI ~ t + season + sx, data = data)
+m_lmm  <- lmer(log_NI ~ t + season + sx + (1 | ringno), data = data)
+m_glmm <- glmer(NI_plus ~ t + season + sx + (1 | ringno), 
+                family = Gamma(link = "log"), data = data)
+
+comparison <- compare_performance(m_lm, m_lmm, m_glmm, rank = TRUE)
+print(comparison)
+
+```
+
+## Males or females neglect more?
+
+```{r basic4, echo = TRUE}
+model_sex_diff_tweedie <- glmmTMB(
+  NI ~ t + season + sx + (1 | ringno), 
+  family = tweedie(link = "log"), 
+  data = data
+)
+
+summary(model_sex_diff_tweedie)
+```
+
+## Neglect models for males and females separately
+
+```{r basic51, echo = TRUE}
+model_neglect_female <- glmmTMB(
+  NI ~ t + season + (1 | ringno), 
+  family = tweedie(link = "log"), 
+  data = data_female
+)
+
+model_neglect_male <- glmmTMB(
+  NI ~ t + season + (1 | ringno), 
+  family = tweedie(link = "log"), 
+  data = data_male
+)
+
+summary(model_neglect_female)
+summary(model_neglect_male)
+```
+
+Main conclusions from those models are: 
+
+ - there are no differences in neglect between females and males
+ 
+ - t is significant both for males and females
+ 
+ - there are minor seasonal differences
+ 
+
+# Repeatability of egg neglect for males and females
+
+
+```{r basic5, echo=FALSE, warning=FALSE, message=FALSE, include = FALSE}
+rep_male <- rpt(log(NI + 0.001) ~ t + season + (1 | ringno), 
+                 grname = "ringno", 
+                 data = data_male, 
+                 datatype = "Gaussian", 
+                 nboot = 1000, npermut = 1000)
+
+print(rep_male)
+plot(rep_male) 
+
+rep_female <- rpt(log(NI + 0.001) ~ t + season + (1 | ringno), 
+                grname = "ringno", 
+                data = data_female, 
+                datatype = "Gaussian", 
+                nboot = 1000, npermut = 1000)
+
+print(rep_female)
+plot(rep_female) 
+```
+
+Rep female
+```{r basic60, echo = TRUE}
+print(rep_female)
+plot(rep_female) 
+```
+
+Rep male
+```{r basic6, echo = TRUE}
+print(rep_male)
+plot(rep_male) 
+```
+
+
+# Repeatability of pairs NI - rptR
+
+```{r basic 7, echo=FALSE, warning=FALSE, message=FALSE, include = FALSE}
+setwd("C:/Users/Martyna/Dropbox/Negotiation/NI_files")
+
+library(dplyr)
+library(ggplot2)
+library(glmmTMB)
+library(rptR)
+library(DHARMa)
+
+# 1. Load Cleaned Data
+merged <- read.csv2("./NI_cleaned_data.csv", header=TRUE) %>%
+  mutate(across(c(Pair_ID, Season, Nest, session), as.factor),
+         across(c(NI, t, Similarity_Index_Tarsus), as.numeric))
+
+# 2. Filter for Repeatability Analysis (Pairs with 2+ seasons)
+merged_filt <- merged %>%
+  group_by(Pair_ID, Season) %>%
+  mutate(has_incubation1 = any(session == "incubation1"),
+         n_obs = n()) %>%
+  filter(has_incubation1 == TRUE & n_obs >= 2) %>%
+  group_by(Pair_ID) %>%
+  filter(n_distinct(Season) >= 2) %>% 
+  ungroup()
+
+
+rep_final <- rpt(log(NI + 0.001) ~ t + (1 | Pair_ID), 
+                 grname = "Pair_ID", 
+                 data = merged_filt, 
+                 datatype = "Gaussian", 
+                 nboot = 1000, npermut = 1000)
+
+```
+
+## Repeatability of pairs NI - rptR
+
+```{r basic10, echo = TRUE}
+
+print(rep_final)
+plot(rep_final) # Distribution of the repeatability R
+
+```
+
+
+# Last thing - testing if characteristics of a pair explain neglect of a pair
+
+## Pair bond duration
+ 
+```{r basic11, echo=FALSE, warning=FALSE, message=FALSE, include = FALSE}
+# 0. Setup & Libraries
+rm(list = ls())
+setwd("C:/Users/Martyna/Dropbox/Negotiation/NI_files")
+
+library(ordinal)
+library(dplyr)      # Data manipulation
+library(glmmTMB)    # Tweedie GLMMs
+library(bbmle)      # AIC comparison
+library(DHARMa)     # Residual diagnostics
+library(sjPlot)     # Table summaries (optional)
+
+# 1. Load Data
+data <- read.csv("./Julian_Date_COINr_NI.csv", sep=";", header=TRUE)
+predictors <- read.csv("./SI_PS.csv", sep=";", header=TRUE)
+
+# 2. Merge and Clean
+merged <- data %>%
+  select(Season, session, Nest, NI, Incubation_Duration, Days_to_Hatch) %>%
+  left_join(
+    predictors %>% select(Season, Nest, ID1, ID2, Similarity_Index, Pair_status, 
+                          Similarity_Index_Head, Similarity_Index_Tarsus),
+    by = c("Nest", "Season")
+  ) %>%
+  # Remove rows missing key predictors
+  filter(!is.na(Similarity_Index), 
+         !is.na(Similarity_Index_Head), 
+         !is.na(Similarity_Index_Tarsus)) %>%
+  # Convert comma-decimals to numeric for all relevant columns
+  mutate(across(c(NI, Similarity_Index, Similarity_Index_Head, 
+                  Similarity_Index_Tarsus, Incubation_Duration, Days_to_Hatch), 
+                ~ as.numeric(gsub(",", ".", .)))) %>%
+  # Create Identifiers and Factors
+  mutate(
+    Nest_Season = as.factor(paste(Nest, "_", Season)),
+    Pair_ID = as.factor(paste(pmin(ID1, ID2), pmax(ID1, ID2), sep = "_")),
+    Season = as.factor(Season),
+    Nest = as.factor(Nest),
+    Pair_status = as.factor(Pair_status),
+    # Time variable (t=0 at day 31, t=1 at day 0)
+    t = (31 - Days_to_Hatch) / 31
+  )
+
+```
+
+```{r basic12, echo = TRUE}
+model_pair_bond <- glmmTMB(NI ~ t + Pair_status + (1 | Pair_ID), 
+                           data = merged, family = tweedie(link = "log"))
+summary(model_pair_bond)
+
+```
+
+## Similarity index - wing length 
+
+```{r basic13, echo = TRUE}
+model_wing      <- glmmTMB(NI ~ t + Similarity_Index + (1 | Pair_ID), 
+                           data = merged, family = tweedie(link = "log"))
+summary(model_wing)
+```
+
+## Similarity index - tarsus
+
+```{r basic14, echo = TRUE}
+model_tarsus    <- glmmTMB(NI ~ t + Similarity_Index_Tarsus + (1 | Pair_ID), 
+                           data = merged, family = tweedie(link = "log"))
+summary(model_tarsus)
+```
+
+## Similarity index - THL                  
+                  
+```{r basic15, echo = TRUE}
+model_head      <- glmmTMB(NI ~ t + Similarity_Index_Head + (1 | Pair_ID), 
+                           data = merged, family = tweedie(link = "log"))
+summary(model_head)
+```
+
+## Testing if pairs NI prolong duration of incubation phase
+
+```{r basic111, echo = TRUE}
+library(boot)
+
+merged_filtered <- merged %>%
+  filter(Season %in% c(2019, 2021))
+
+# Step 2: Identify pair-seasons with all 3 incubation phases
+complete_pair_seasons <- merged_filtered %>%
+  group_by(Pair_ID, Season) %>%
+  summarise(n_sessions = n_distinct(session), .groups = "drop") %>%
+  filter(n_sessions == 3)
+
+# Step 3: Create pair-season-level summary
+pair_season_summary <- merged_filtered %>%
+  semi_join(complete_pair_seasons, by = c("Pair_ID", "Season")) %>%
+  group_by(Pair_ID, Season, Pair_status) %>%
+  summarise(
+    mean_NI = mean(NI, na.rm = TRUE),
+    total_NI = sum(NI, na.rm = TRUE),
+    Incubation_Duration = first(Incubation_Duration),
+    Days_to_Hatch = first(Days_to_Hatch),
+    .groups = "drop"
+  )
+
+# Step 4: Bootstrap analysis for correlation (pair-season level)
+boot_correlation <- function(data, indices) {
+  d <- data[indices, ]
+  cor(d$total_NI, d$Incubation_Duration, use = "complete.obs")
+}
+
+set.seed(123)
+boot_res_cor <- boot(data = pair_season_summary,
+                     statistic = boot_correlation,
+                     R = 10000)
+
+
+if (sd(boot_res_cor$t, na.rm = TRUE) == 0) {
+  ci_perc_cor <- NA
+  ci_bca_cor <- NA
+} else {
+  ci_perc_cor <- boot.ci(boot_res_cor, type = "perc")$percent[4:5]
+  ci_bca_cor  <- boot.ci(boot_res_cor, type = "bca")$bca[4:5]
+}
+
+p_val_cor <- mean(abs(boot_res_cor$t) >= abs(boot_res_cor$t0), na.rm = TRUE)
+
+cor_results <- list(
+  observed_correlation = boot_res_cor$t0,
+  percentile_CI = ci_perc_cor,
+  BCa_CI = ci_bca_cor,
+  p_value = p_val_cor,
+  bootstrap_object = boot_res_cor
+)
+
+# Step 5: Bootstrap analysis for regression slope
+boot_regression <- function(data, indices) {
+  d <- data[indices, ]
+  model <- lm(Incubation_Duration ~ total_NI, data = d)
+  coef(model)[2]
+}
+
+set.seed(123)
+boot_res_reg <- boot(data = pair_season_summary,
+                     statistic = boot_regression,
+                     R = 10000)
+
+if (sd(boot_res_reg$t, na.rm = TRUE) == 0) {
+  ci_perc_reg <- NA
+  ci_bca_reg <- NA
+} else {
+  ci_perc_reg <- boot.ci(boot_res_reg, type = "perc")$percent[4:5]
+  ci_bca_reg  <- boot.ci(boot_res_reg, type = "bca")$bca[4:5]
+}
+
+p_val_reg <- mean(abs(boot_res_reg$t) >= abs(boot_res_reg$t0), na.rm = TRUE)
+
+reg_results <- list(
+  observed_slope = boot_res_reg$t0,
+  percentile_CI = ci_perc_reg,
+  BCa_CI = ci_bca_reg,
+  p_value = p_val_reg,
+  bootstrap_object = boot_res_reg
+)
+
+print(reg_results)
+
+```
+
+
+Summary from the models:
+
+ - there is no significant influence of head, tarsus similarity or wing similarity
+ - pair bond duration is not significant
+ - NI do not affect duration of incubation phase (2021 and 2019 only)
+
+# Additional data to the supplementary materials - to do
+
+Neglect :
+
+ - maximum single and total neglect duration, minimum neglect duration - both for males and females
+ 
+ - frequency of egg neglect both for males and females
+
+ 
