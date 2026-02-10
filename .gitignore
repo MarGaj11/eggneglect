@@ -1,0 +1,15 @@
+# R specific
+.Rhistory
+.RData
+.Rproj.user/
+
+# Data files - don't upload to GitHub
+*.xlsx
+*.xls
+*.csv
+*.rds
+*.RData
+*.rda
+
+# Other
+.DS_Store
