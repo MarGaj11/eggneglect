@@ -7,7 +7,6 @@
 *.xlsx
 *.xls
 *.csv
-*.rds
 *.RData
 *.rda
 
