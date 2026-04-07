@@ -11,7 +11,7 @@ library(tidyverse)
 library(lubridate)
 library(purrr)
 
-setwd("C:/Users/Martyna/Dropbox/Negotiation/NI_files")
+#setwd("C:/Users/Martyna/Dropbox/Negotiation/NI_files")
 
 # ── 1. LOAD & PREPARE DATA ────────────────────────────────────────────────────
 
@@ -285,19 +285,41 @@ neglect_summary <- gaps_attributed %>%
     .groups = "drop"
   )
 
+# ── 3.1 CREATE RINGNO LOOKUP ────────────────────────────────────────────────
+# We extract the unique combination of nest, season, sex, and ringno
+ring_lookup <- act_dt %>%
+  filter(!is.na(sx), !is.na(ringno)) %>%
+  distinct(season, nest, sx, ringno) %>%
+  mutate(season = as.character(season))
+
+# If a bird has multiple ringnos for some reason, we take the first
+ring_lookup <- ring_lookup %>%
+  group_by(season, nest, sx) %>%
+  slice(1) %>%
+  ungroup()
+
 neglect_wide <- all_combinations %>%
+  left_join(ring_lookup, by = c("season", "nest", "sx")) %>% # Join ringno here
   left_join(neglect_summary,  by = c("season", "session", "nest", "sx")) %>%
   left_join(incubation_stats, by = c("season", "session", "nest", "sx")) %>%
   mutate(
-    n_gaps                   = replace_na(n_gaps, 0),
-    sum_neglect_sec          = replace_na(sum_neglect_sec, 0),
-    mean_neglect_sec         = replace_na(mean_neglect_sec, 0),
+    n_gaps                    = replace_na(n_gaps, 0),
+    sum_neglect_sec           = replace_na(sum_neglect_sec, 0),
     n_incubations            = replace_na(n_incubations, 0),
     mean_incubation_duration = replace_na(mean_incubation_duration, 0)
   )
 
-# ── 9. JOIN PHENOLOGY & PAIR BOND (identical to Script 1) ────────────────────
+# ── 9. JOIN PHENOLOGY & RINGNO ───────────────────────────────────────────────
 
+# 1. Create the Ring Number Lookup from the original data
+ring_lookup <- act_dt %>%
+  distinct(season, nest, sx, ringno) %>%
+  mutate(season = as.character(season)) %>%
+  group_by(season, nest, sx) %>%
+  slice(1) %>%
+  ungroup()
+
+# 2. Existing Phenology Joins
 act_pheno <- act_dt %>%
   select(season, session, nest, session_start) %>%
   distinct() %>%
@@ -334,7 +356,9 @@ date_data <- readRDS("DPA_d05_status_activity data.rds") %>%
     season            = as.character(season)
   )
 
+# 3. Final Assembly of neglect_wide (One row per bird)
 neglect_wide <- neglect_wide %>%
+  mutate(season = as.character(season)) %>%
   mutate(season = as.numeric(season)) %>%
   left_join(act_pheno_temp, by = c("season", "session", "nest")) %>%
   left_join(pair_bond,      by = c("season", "nest")) %>%
@@ -346,9 +370,9 @@ neglect_wide <- neglect_wide %>%
   left_join(date_data, by = c("season", "session", "nest")) %>%
   arrange(season, nest, session, sx)
 
+# SAVE WIDE TABLE (Contains ringno for each m/f row)
 saveRDS(neglect_wide, "EDA_sex_neglect_wide.RDS")
-message("Wide table saved: ", nrow(neglect_wide), " rows.")
-
+message("Wide table saved with Ring IDs: ", nrow(neglect_wide), " rows.")
 # ── 10. GANTT VERIFICATION PLOTS ─────────────────────────────────────────────
 # Two rows per session panel: m (top) and f (bottom)
 # Green = nest attended | Grey = absence
@@ -531,20 +555,23 @@ overlaps_summary <- plyr::ldply(overlaps_list, data.frame) %>%
 
 # Convert sex-wide into nest-level informative table
 neglect_table_final <- neglect_wide %>%
-  
   group_by(season, session, nest) %>%
   summarise(
-    # Classic neglect
+    # Identify specific IDs for each sex
+    ringno_m = first(ringno[sx == "m"]),
+    ringno_f = first(ringno[sx == "f"]),
+    
+    # Classic neglect (Totals)
     n_gaps            = sum(n_gaps, na.rm = TRUE),
     mean_gaps         = mean(mean_neglect_sec[sum_neglect_sec > 0], na.rm = TRUE),
     sum_gaps          = sum(sum_neglect_sec, na.rm = TRUE),
     
-    # Male-specific
+    # Male-specific neglect
     n_gaps_m          = sum(n_gaps[sx == "m"], na.rm = TRUE),
     sum_gaps_m        = sum(sum_neglect_sec[sx == "m"], na.rm = TRUE),
     mean_gaps_m       = mean(mean_neglect_sec[sx == "m"], na.rm = TRUE),
     
-    # Female-specific
+    # Female-specific neglect
     n_gaps_f          = sum(n_gaps[sx == "f"], na.rm = TRUE),
     sum_gaps_f        = sum(sum_neglect_sec[sx == "f"], na.rm = TRUE),
     mean_gaps_f       = mean(mean_neglect_sec[sx == "f"], na.rm = TRUE),
@@ -552,11 +579,10 @@ neglect_table_final <- neglect_wide %>%
     # Incubation behaviour
     n_incubations_m   = sum(n_incubations[sx == "m"], na.rm = TRUE),
     n_incubations_f   = sum(n_incubations[sx == "f"], na.rm = TRUE),
-    
     mean_incubation_m = mean(mean_incubation_duration[sx == "m"], na.rm = TRUE),
     mean_incubation_f = mean(mean_incubation_duration[sx == "f"], na.rm = TRUE),
     
-    # Metadata (preserve one value per nest-session)
+    # Metadata (preserving environmental/phenology variables)
     session_start         = first(session_start),
     hatch_succ            = first(hatch_succ),
     hatch_date            = first(hatch_date),
@@ -574,18 +600,19 @@ neglect_table_final <- neglect_wide %>%
     .groups = "drop"
   ) %>%
   
-  left_join(overlaps_summary,
-            by = c("season", "session", "nest")) %>%
+  # Join the overlap data calculated earlier
+  left_join(overlaps_summary, by = c("season", "session", "nest")) %>%
   
+  # Final clean-up and Bias calculation
   mutate(
     mean_gaps = replace_na(mean_gaps, 0),
     mean_gaps_m = replace_na(mean_gaps_m, 0),
     mean_gaps_f = replace_na(mean_gaps_f, 0),
     
+    # Positive value = Male neglected more; Negative = Female neglected more
     neglect_bias_male = sum_gaps_m - sum_gaps_f,
     neglect_ratio_male = ifelse(sum_gaps == 0, 0, sum_gaps_m / sum_gaps)
   ) %>%
-  
   arrange(season, nest, session)
 
 head(neglect_table_final)

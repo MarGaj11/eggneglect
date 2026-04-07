@@ -6,6 +6,7 @@ library(lubridate)
 library(splines)
 
 S <- readRDS("EDA_sex_neglect_wide.RDS")
+head(S)
 G <- readRDS("EDA_sex_gaps_hourly.RDS")
 
 hour_seq     <- 0:23
@@ -996,4 +997,43 @@ for(sex_now in c("f", "m")) {
     )
   }
 }
+
+
+##################### repeatability
+library(rptR)
+str(S)
+S$ringno <- as.factor(S$ringno)
+S$log_n_gaps <- log(S$n_gaps + 0.1)
+
+model_gauss <- rpt(n_gaps ~ session + season + (1 | ringno), 
+                   grname = "ringno", 
+                   data = S, 
+                   datatype = "Poisson", 
+                   nboot = 1000, 
+                   npermut = 1000)
+
+print(model_gauss)
+
+S_male <- S %>%
+  filter(sx == "m")
+S_female <- S %>%
+  filter(sx == "f")
+
+rep_male <- rpt(n_gaps ~ session + season + (1 | ringno), 
+                   grname = "ringno", 
+                   data = S_male, 
+                   datatype = "Poisson", 
+                   nboot = 1000, 
+                   npermut = 1000)
+
+rep_female <- rpt(n_gaps ~ session + season + (1 | ringno), 
+                grname = "ringno", 
+                data = S_female, 
+                datatype = "Poisson", 
+                nboot = 1000, 
+                npermut = 1000)
+
+print(rep_male)
+print(rep_female)
+
 
