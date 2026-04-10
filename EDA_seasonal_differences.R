@@ -156,7 +156,7 @@ for(s in 1:n_seasons){
   lines(day_seq, mu_list[[s]], lwd = 3.5, col = cols[s])
 }
 
-legend("topleft",
+legend("topright",
        legend = season_levels,
        col = cols[1:n_seasons],
        pch = 16,
@@ -293,203 +293,6 @@ d_neg <- list(
   sex_id = D_neg$sex_id,
   dph_c = D_neg$dph_c
 )
-# =========================================================
-# SEASONAL DIFFERENCES IN SUM_GAPS
-# =========================================================
-
-D_season <- D_neg %>%
-  mutate(
-    season = as.character(season),
-    sex_season = paste(sx, season, sep = "_"),
-    sex_season_id = as.integer(factor(sex_season))
-  )
-
-group_lookup <- D_season %>%
-  distinct(sex_season_id, sx, season) %>%
-  arrange(sx, season)
-
-n_groups <- length(unique(D_season$sex_season_id))
-
-d_season <- list(
-  y = D_season$neglect_log,
-  sex_season_id = D_season$sex_season_id,
-  dph_c = D_season$dph_c
-)
-
-m_neg_season <- quap(
-  alist(
-    y ~ dnorm(mu, sigma),
-    
-    mu <- a[sex_season_id] + b[sex_season_id] * dph_c,
-    
-    a[sex_season_id] ~ dnorm(6, 0.5),
-    b[sex_season_id] ~ dnorm(0, 0.08),
-    sigma ~ dexp(1)
-  ),
-  data = d_season,
-  start = list(
-    a = rep(6, n_groups),
-    b = rep(0, n_groups),
-    sigma = 1
-  )
-)
-
-precis(m_neg_season, depth = 2)
-
-post_season <- extract.samples(m_neg_season)
-
-par(mfrow = c(1,2))
-
-season_levels <- sort(unique(D_season$season))
-season_cols <- rainbow(length(season_levels))
-
-for(sex_now in c("f", "m")) {
-  
-  # collect all posterior intercepts for axis range
-  vals_now <- c()
-  
-  for(i in seq_along(season_levels)) {
-    id_now <- group_lookup %>%
-      filter(sx == sex_now, season == season_levels[i]) %>%
-      pull(sex_season_id)
-    
-    vals_now <- c(vals_now, post_season$a[, id_now])
-  }
-  
-  plot(NULL,
-       xlim = range(vals_now),
-       ylim = c(0, 1.2),
-       xlab = "Log total neglect (sec)",
-       ylab = "Posterior density",
-       main = ifelse(sex_now == "f", "Females", "Males"))
-  
-  for(i in seq_along(season_levels)) {
-    
-    id_now <- group_lookup %>%
-      filter(sx == sex_now, season == season_levels[i]) %>%
-      pull(sex_season_id)
-    
-    dens(post_season$a[, id_now],
-         col = season_cols[i],
-         lwd = 3,
-         add = TRUE)
-  }
-  
-  legend("topright",
-         legend = season_levels,
-         col = season_cols,
-         lwd = 3,
-         cex = 0.8,
-         bty = "n")
-}
-
-par(mfrow = c(1,1))
-
-# =========================================================
-# GGPLOT2 VERSION: Posterior Densities by Sex and Season
-# =========================================================
-library(ggplot2)
-
-# 1. Prepare data for plotting
-# We convert the list of samples into a clean long data frame
-post_df <- data.frame()
-
-for(i in 1:n_groups) {
-  # Get group info from your lookup
-  info <- group_lookup[group_lookup$sex_season_id == i, ]
-  
-  # Extract samples for the intercept 'a' for this group
-  samples <- data.frame(
-    neglect_log = post_season$a[, i],
-    Sex = ifelse(info$sx == "f", "Females", "Males"),
-    Season = as.character(info$season)
-  )
-  
-  post_df <- rbind(post_df, samples)
-}
-
-# 2. Create the Plot
-ggplot(post_df, aes(x = neglect_log, fill = Season, color = Season)) +
-  # Use facet_wrap to separate Females and Males into different grids
-  facet_wrap(~Sex, scales = "free_y") +
-  
-  # Add density curves with transparency (alpha)
-  geom_density(alpha = 0.3, size = 1) +
-  
-  # Style and Labels
-  theme_minimal() +
-  labs(
-    title = "Posterior Distribution of Log Total Neglect",
-    subtitle = "Comparing seasonal intercepts between sexes",
-    x = "Posterior Intercept (Log Seconds)",
-    y = "Density"
-  ) +
-  
-  # Use a nice color palette
-  scale_fill_brewer(palette = "Set1") +
-  scale_color_brewer(palette = "Set1") +
-  
-  # Final touches to make it look "pretty"
-  theme(
-    strip.text = element_text(size = 14, face = "bold"),
-    legend.position = "bottom",
-    panel.spacing = unit(2, "lines")
-  )
-# =========================================================
-# KEY RESULTS: SEASON DIFFERENCES WITHIN SEX
-# =========================================================
-
-cat("\n=== SEASON DIFFERENCES IN TOTAL NEGLECT ===\n")
-
-season_pairs <- combn(season_levels, 2, simplify = FALSE)
-
-for(sex_now in c("f", "m")) {
-  
-  cat("\n---", ifelse(sex_now == "f", "FEMALES", "MALES"), "---\n")
-  
-  for(pair in season_pairs) {
-    
-    id1 <- group_lookup %>%
-      filter(sx == sex_now, season == pair[1]) %>%
-      pull(sex_season_id)
-    
-    id2 <- group_lookup %>%
-      filter(sx == sex_now, season == pair[2]) %>%
-      pull(sex_season_id)
-    
-    diff_post <- post_season$a[, id1] - post_season$a[, id2]
-    
-    cat(
-      pair[1], "-", pair[2],
-      "| Mean diff =", round(mean(diff_post), 3),
-      "| PI =", round(PI(diff_post), 3),
-      "| P(>0) =", round(mean(diff_post > 0), 3),
-      "\n"
-    )
-  }
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -500,7 +303,6 @@ for(sex_now in c("f", "m")) {
 #   1) probability of any gap
 #   2) duration conditional on gap > 0
 
-rm(list = ls())
 library(rethinking)
 library(tidyverse)
 library(lubridate)
@@ -722,7 +524,7 @@ legend("topleft",
 # -------------------------
 plot(NULL,
      xlim = c(28, 2),
-     ylim = c(0, max(E_pos$sum_gaps) * 1.1),
+     ylim = c(0, 10000),
      xlab = "Days prior hatch",
      ylab = "Duration given gap",
      main = "Season differences in positive gap duration")
@@ -743,32 +545,13 @@ for(s in 1:n_seasons){
   lines(day_seq, dur_mu[[s]], lwd = 3.5, col = cols[s])
 }
 
-legend("topleft",
+legend("topright",
        legend = season_levels,
        col = cols[1:n_seasons],
        pch = 16,
        lwd = 3,
        bty = "n")
 
-# -------------------------
-# C) overall expected total
-# -------------------------
-plot(NULL,
-     xlim = c(28, 2),
-     ylim = c(0, max(E_fit$sum_gaps) * 1.1),
-     xlab = "Days prior hatch",
-     ylab = "Expected total gap duration",
-     main = "Overall expected gap duration")
-
-for(s in 1:n_seasons){
-  lines(day_seq, comb_mu[[s]], lwd = 3.5, col = cols[s])
-}
-
-legend("topleft",
-       legend = season_levels,
-       col = cols[1:n_seasons],
-       lwd = 3,
-       bty = "n")
 
 # =========================================================
 # 7. INTERPRETATION
