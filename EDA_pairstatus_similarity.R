@@ -13,8 +13,7 @@ E <- readRDS("./EDA_egg_neglect_index_neglect_table.RDS")
 
 E <- E %>%
   mutate(
-    session_id = as.integer(factor(session, levels = c("incubation1", "incubation2", "incubation3"))),
-    pair_01    = ifelse(Pair_status == "Old", 1, 0),
+    pair_01     = ifelse(Pair_status == "Old", 1, 0),
     has_neglect = ifelse(sum_gaps > 0, 1, 0)
   )
 
@@ -22,17 +21,18 @@ E <- E %>%
 D_all     <- E %>% filter(!is.na(Pair_status), !is.na(n_gaps), !is.na(session))
 D_nonzero <- D_all %>% filter(sum_gaps > 0)
 
+
 # =========================================================
-# 2. PAIR STATUS ANALYSIS - here I do the analysis on all the sessions, because of low sample size
+# 2. PAIR STATUS ANALYSIS (Aggregated Sessions)
 # =========================================================
 
-# --- 2.1 Models ---
+# --- 2.1 Models (session_id removed) ---
 # Frequency Model (Poisson)
 m_status_freq <- quap(
   alist(
     n_gaps ~ dpois(lambda),
-    log(lambda) <- a[session_id] + b * pair_01,
-    a[session_id] ~ dnorm(0, 0.8),
+    log(lambda) <- a + b * pair_01,
+    a ~ dnorm(0, 0.8),
     b ~ dnorm(0, 0.5)
   ), data = D_all
 )
@@ -41,84 +41,80 @@ m_status_freq <- quap(
 m_status_dur <- quap(
   alist(
     sum_gaps ~ dgamma2(mu, scale), 
-    log(mu) <- a[session_id] + b * pair_01,
-    a[session_id] ~ dnorm(7, 1.5), 
+    log(mu) <- a + b * pair_01,
+    a ~ dnorm(7, 1.5), 
     b ~ dnorm(0, 1),
     scale ~ dexp(1)
   ), data = D_nonzero
 )
 
+
 # --- 2.2 Summaries ---
 post_f <- extract.samples(m_status_freq)
 post_d <- extract.samples(m_status_dur)
 
-cat("\n--- PAIR STATUS RESULTS ---\n")
+cat("\n--- PAIR STATUS RESULTS (Global Intercept) ---\n")
 cat("FREQ: Rate ratio (Old/New):", round(mean(exp(post_f$b)), 3), " | 89% PI:", round(PI(exp(post_f$b)), 3), "\n")
 cat("DUR:  Duration Ratio (Old/New):", round(mean(exp(post_d$b)), 3), " | 89% PI:", round(PI(exp(post_d$b)), 3), "\n")
 cat("DUR:  P(Old Duration > New Duration):", round(mean(post_d$b > 0), 3), "\n")
 
+# --- 2.3 Visualization Preparation ---
 
-# 1. Prepare Model Estimate Dataframes
+# Prepare Frequency Model Estimate Dataframe
 plot_freq_df <- data.frame(
   status = factor(c("New", "Old"), levels = c("New", "Old")),
-  mu = c(mean(exp(post_f$a[,1])), mean(exp(post_f$a[,1] + post_f$b))),
-  low = c(PI(exp(post_f$a[,1]))[1], PI(exp(post_f$a[,1] + post_f$b))[1]),
-  high = c(PI(exp(post_f$a[,1]))[2], PI(exp(post_f$a[,1] + post_f$b))[2])
+  mu = c(mean(exp(post_f$a)), mean(exp(post_f$a + post_f$b))),
+  low = c(PI(exp(post_f$a))[1], PI(exp(post_f$a + post_f$b))[1]),
+  high = c(PI(exp(post_f$a))[2], PI(exp(post_f$a + post_f$b))[2])
 )
 
+# Prepare Duration Model Estimate Dataframe
 plot_dur_df <- data.frame(
   status = factor(c("New", "Old"), levels = c("New", "Old")),
-  mu = c(mean(exp(post_d$a[,1])), mean(exp(post_d$a[,1] + post_d$b))),
-  low = c(PI(exp(post_d$a[,1]))[1], PI(exp(post_d$a[,1] + post_d$b))[1]),
-  high = c(PI(exp(post_d$a[,1]))[2], PI(exp(post_d$a[,1] + post_d$b))[2])
+  mu = c(mean(exp(post_d$a)), mean(exp(post_d$a + post_d$b))),
+  low = c(PI(exp(post_d$a))[1], PI(exp(post_d$a + post_d$b))[1]),
+  high = c(PI(exp(post_d$a))[2], PI(exp(post_d$a + post_d$b))[2])
 )
 
-# 1. Plot A: Frequency (Nests with Jittered Points)
+# --- 2.4 Plotting ---
+
+library(ggplot2)
+library(patchwork)
+
+# Plot A: Frequency
 p_freq <- ggplot() +
-  # 1. The Violin (Background)
   geom_violin(data = D_all, aes(x = Pair_status, y = n_gaps), 
               fill = "gray90", color = "gray80", alpha = 0.5) +
-  # 2. Raw Data Points (Jittered)
-  # alpha = 0.3 helps see where points overlap
   geom_jitter(data = D_all, aes(x = Pair_status, y = n_gaps),
               width = 0.2, alpha = 0.3, color = "gray40", size = 1) +
-  # 3. Model Estimates (Foreground)
   geom_errorbar(data = plot_freq_df, aes(x = status, ymin = low, ymax = high), 
                 width = 0.1, linewidth = 1.2, color = "black") +
   geom_point(data = plot_freq_df, aes(x = status, y = mu), 
              size = 4, color = "black") +
-  
   labs(title = "A)", x = "Pair Status", y = "Number of exits") +
   theme_bw(base_size = 12, base_family = "sans") +
   theme(panel.grid = element_blank())
-p_freq
-# 2. Plot B: Duration (Nests with Jittered Points)
+
+# Plot B: Duration
 p_dur <- ggplot() +
-  # 1. The Violin (Background)
   geom_violin(data = D_nonzero, aes(x = Pair_status, y = sum_gaps), 
               fill = "gray90", color = "gray80", alpha = 0.5) +
-  # 2. Raw Data Points (Jittered)
   geom_jitter(data = D_nonzero, aes(x = Pair_status, y = sum_gaps),
               width = 0.2, alpha = 0.3, color = "gray40", size = 1) +
-  # 3. Model Estimates (Foreground)
   geom_errorbar(data = plot_dur_df, aes(x = status, ymin = low, ymax = high), 
                 width = 0.1, linewidth = 1.2, color = "black") +
   geom_point(data = plot_dur_df, aes(x = status, y = mu), 
              size = 4, color = "black") +
-  
   scale_y_log10(labels = scales::label_number()) +
-  labs(title = "B)", x = "Pair Status", y = "Duration of neglect in seconds (log scale)") +
+  labs(title = "B)", x = "Pair Status", y = "Duration of neglect (s, log scale)") +
   theme_bw(base_size = 12, base_family = "sans") +
   theme(panel.grid = element_blank())
-p_dur
 
-# To see them together:
-library(patchwork)
-
+# Final Assembly
 final <- p_freq + p_dur
-
+final
 ggsave(
-  "Figure_4_pair_status.png",
+  "Figure_4_pair_status_collapsed.png",
   final,
   width = 8,
   height = 6,

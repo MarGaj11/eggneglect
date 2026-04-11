@@ -150,3 +150,41 @@ for(i in 1:(n_seasons-1)) {
     cat(season_levels[i], "vs", season_levels[j], ": Diff", round(mean(diff), 3), "| Prob(S1>S2):", round(mean(diff > 0), 3), "\n")
   }
 }
+
+
+all_colors <- c(
+  "2019" = "#A50026",
+  "2020" = "#FDAE61",
+  "2021" = "#A6D96A",
+  "2023" = "#006837",
+  "2025" = "#313695"
+)
+
+p <- ggplot(E, aes(x = day_prior_hatch, y = n_gaps, color = season, fill = season)) +
+  geom_point(alpha = 0.6, size = 2.5) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, linewidth = 0.8) +
+  scale_x_reverse(breaks = seq(0, 31, by = 5)) +
+  scale_color_manual(values = all_colors) +
+  scale_fill_manual(values = all_colors) +
+  labs(
+    x = "Days before hatching",
+    y = "Neglect seconds",
+    color = "Season",
+    fill = "Season"
+  ) +
+  theme_bw(base_size = 12) +
+  facet_grid(~season)+
+  theme(
+    legend.position = "right",
+    axis.title = element_text(size = 13, face = "plain", color = "black"),
+    axis.text = element_text(size = 11, color = "black"),
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 0.5),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    strip.background = element_blank(),
+    strip.text = element_blank(),
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10)
+  )
+p
