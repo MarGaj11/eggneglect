@@ -7,6 +7,57 @@ library(splines)
 
 S <- readRDS("EDA_sex_neglect_wide.RDS")
 E <- readRDS("./EDA_egg_neglect_index_neglect_table.RDS")
+G <- readRDS("./EDA_sex_gaps_table.RDS")
+
+#plot to see the duration of absences
+G$duration_category <- cut(
+  G$dur, 
+  breaks = c(0, 300, 600, 900, 1800, 2700, 3600, 7200, Inf), 
+  labels = c("0-5 min", "5-10 min", "10-15 min", "15-30 min", "30-45 min", "45-60 min", "1-2 hours", "2+ hours"),
+  right = FALSE
+)
+
+library(ggplot2)
+
+p <- ggplot(G, aes(x = duration_category)) +
+  geom_bar(fill = "orange") +
+  facet_wrap(~responsible_sex)+
+  labs(title = "Duration of absences",
+       x = "Duration", 
+       y = "No. of absences") +
+  theme_classic()
+p
+
+
+# 1. Combine unique nest-season combinations from both S and E
+# This ensures we don't miss a nest that might be in one dataset but not the other
+all_nest_records <- bind_rows(
+  S %>% select(nest, season),
+  #E %>% select(nest, season)
+) %>% 
+  distinct()
+
+# 2. Count total unique nests
+total_unique_nests <- n_distinct(all_nest_records$nest)
+
+# 3. Identify nests followed for more than one season
+multi_season_summary <- all_nest_records %>%
+  group_by(nest) %>%
+  summarise(n_seasons = n_distinct(season)) %>%
+  filter(n_seasons > 1)
+
+session_counts_per_year <- E %>%
+  group_by(season) %>%
+  summarise(
+    total_sampling_events = n()
+  )
+
+# 4. Final counts
+n_multi_season <- nrow(multi_season_summary)
+
+# Print results
+cat("Total unique nests across all seasons:", total_unique_nests, "\n")
+cat("Number of nests followed for >1 season:", n_multi_season, "\n")
 
 # Global sequence for predictions (0 is hatching, 28 is early incubation)
 DAY_SEQ <- seq(2, 28, length.out = 100)
@@ -73,8 +124,30 @@ cat("Multiplicative change per day: exp(b) =", round(exp(mean(post_ov$b)), 3), "
 # 2. MODEL: SEX-SPECIFIC FREQUENCY (n_gaps)
 # =========================================================
 
+G_summary <- G %>%
+  filter(dur >= 300) %>%
+  group_by(season, session, nest, responsible_sex) %>%
+  summarise(
+    n_gaps = n(),
+    sum_neglect_sec = sum(dur),
+    mean_neglect_sec = mean(dur),
+    .groups = "drop"
+  ) %>%
+  rename(sx = responsible_sex)
+
+# Replace the neglect columns in S with the filtered versions
+S_filt <- S %>%
+  select(-n_gaps, -sum_neglect_sec, -mean_neglect_sec) %>%
+  left_join(G_summary, by = c("season", "session", "nest", "sx")) %>%
+  mutate(
+    sum_neglect_sec = replace_na(sum_neglect_sec, 0),
+    mean_neglect_sec = replace_na(mean_neglect_sec, 0),
+    n_gaps = replace_na(n_gaps, 0L)
+  )
+
+
 # --- 2.1 Data Preparation ---
-E_fit_sex <- S %>%
+E_fit_sex <- S_filt %>%
   filter(!is.na(day_prior_hatch), !is.na(sx),
          day_prior_hatch >= 2, day_prior_hatch <= 28) %>%
   mutate(sex_id = ifelse(sx == "f", 1, 2),
@@ -125,56 +198,64 @@ plot_gaps_df <- data.frame(
 col_female <- "darkorange" 
 col_male   <- "navyblue" 
 
-# 3. Create the Plot
+
+# Symulujemy obserwacje (n_gaps) dla każdego punktu w oryginalnych danych
+# m_sex to Twój dopasowany model quap
+post_samples <- sim(m_sex, data = d_sex)
+# Bierzemy losową próbkę symulacji (np. pierwszą), aby pokazać realistyczny rozrzut
+E_fit_sex$post_n_gaps <- post_samples[1, ]
+
+# 2. Tworzenie wykresu
 p1 <- ggplot() +
-  # Ribbons
+  # --- 1. Wstęgi Niepewności ---
   geom_ribbon(data = plot_gaps_df, aes(x = day, ymin = f_low, ymax = f_high),  
               fill = col_female, alpha = 0.15) +
   geom_ribbon(data = plot_gaps_df, aes(x = day, ymin = m_low, ymax = m_high),  
               fill = col_male, alpha = 0.15) +
-  labs(title = "A)")+
   
-  # Mean Lines
-  geom_line(data = plot_gaps_df, aes(x = day, y = f_mu), color = col_female, linewidth = 1.2) +
-  geom_line(data = plot_gaps_df, aes(x = day, y = m_mu), color = col_male, linewidth = 1.2) +
+  # --- 2. Linie Trendu (Średnie) ---
+  geom_line(data = plot_gaps_df, aes(x = day, y = f_mu), 
+            color = col_female, linewidth = 1.2) +
+  geom_line(data = plot_gaps_df, aes(x = day, y = m_mu), 
+            color = col_male, linewidth = 1.2) +
   
-  # Bubble Points (Raw n_gaps data)
-  geom_count(data = E_fit_sex, aes(x = day_prior_hatch, y = n_gaps, 
-                                   color = as.factor(sex_id)), alpha = 0.4) +
+  # --- 3. Bąbelki Posterior Predictive ---
+  geom_count(data = E_fit_sex, 
+             aes(x = day_prior_hatch, y = post_n_gaps, color = as.factor(sex_id)), 
+             alpha = 0.3,
+             position = position_jitter(width = 0.15, height = 0.05)) +
   
-  # Manual Color Scales
+  # --- 4. Przywrócone Adnotacje Płci ---
+  annotate("text", x = 27.8, y = max(plot_gaps_df$m_mu) * 1.4, 
+           label = "\u2642", size = 10, color = col_male, fontface = "bold", family = "sans") +
+  annotate("text", x = 27.8, y = 0.7, 
+           label = "\u2640", size = 10, color = col_female, fontface = "bold", family = "sans") +
+  
+  # --- 5. Skalowanie i Etykiety ---
   scale_color_manual(values = c("1" = col_female, "2" = col_male), guide = "none") +
-  
-  # Sex Labels (Using same multipliers as your neglect plot for consistency)
-  annotate("text", x = 27.8, y = max(plot_gaps_df$m_mu) * 1.25, 
-           label = "\u2642", size = 9, color = col_male, fontface = "bold", family = "sans") +
-  annotate("text", x = 27.8, y = min(plot_gaps_df$f_mu) * 3, 
-           label = "\u2640", size = 9, color = col_female, fontface = "bold", family = "sans") +
-  
-  # Scaling (Linear scale for n_gaps, reversed X for time)
-  scale_x_reverse(breaks = seq(2, 28, by = 5)) +
-  ylim(0, 15) +
+  scale_x_reverse(breaks = seq(0, 30, by = 5)) +
+  scale_y_continuous(
+    # Zoom na istotny zakres (model Poissona rzadko wychodzi poza 4-5)
+    limits = c(-0.3, 2.2), 
+    breaks = seq(0, 5, by = 1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
   scale_size_continuous(name = "n obs", range = c(1, 7)) +
-  labs(x = "Days prior hatch", y = "Number of neglect gaps") +
+  labs(title = "A)", x = "Days prior hatch", y = "Number of neglect gaps") +
   
-  # --- THE "PRETTY" ADJUSTMENTS (Identical to your neglect plot) ---
-  theme_bw(base_size = 12, base_family = "sans") + 
+  # --- 6. Motyw Graficzny ---
+  theme_bw(base_size = 12, base_family = "sans") +
   theme(
     panel.grid = element_blank(),
     legend.position = c(0.90, 0.85),
     legend.background = element_blank(),
-    
-    # Matching fonts and sizes exactly
-    axis.title.x = element_text(size = 13, face = "plain", family = "sans", color = "black"),
-    axis.title.y = element_text(size = 13, face = "plain", family = "sans", color = "black"),
-    axis.text.x = element_text(size = 11, family = "sans", color = "black"),
-    axis.text.y = element_text(size = 11, family = "sans", color = "black"),
-    
-    legend.title = element_text(size = 11, face = "plain", family = "sans"),
-    legend.text = element_text(size = 10, family = "sans"),
+    axis.title = element_text(size = 13, color = "black"),
+    axis.text = element_text(size = 11, color = "black"),
     plot.margin = margin(10, 10, 10, 10)
   )
+
 p1
+
 # --- 2.5 Interpretation & Contrasts ---
 post_s_samp <- extract.samples(m_sex)
 diff_a <- post_s_samp$a[,1] - post_s_samp$a[,2]
@@ -183,7 +264,7 @@ gap_diff <- exp(post_s_samp$a[,1]) - exp(post_s_samp$a[,2])
 cat("\n=== SEX FREQUENCY RESULTS ===\n")
 cat("Female slope:", round(mean(post_s_samp$b[,1]), 4), "P(<0):", mean(post_s_samp$b[,1]<0), "\n")
 cat("Male slope:  ", round(mean(post_s_samp$b[,2]), 4), "P(<0):", mean(post_s_samp$b[,2]<0), "\n")
-cat("Mean Gap Diff (F-M):", round(mean(gap_diff), 2), "PI:", round(PI(gap_diff), 2), "\n")
+cat("Mean Exit Diff (F-M):", round(mean(gap_diff), 2), "PI:", round(PI(gap_diff), 2), "\n")
 cat("Prob Female > Male (Baseline):", mean(diff_a > 0), "\n")
 
 
@@ -198,7 +279,10 @@ col_male   <- "navyblue"
 # 3A. PROBABILITY OF NEGLECT (includes zeros)
 # ---------------------------------------------------------
 
-D_occ <- S %>%
+head(G)
+head(S)
+
+D_occ <- S_filt %>%
   filter(
     !is.na(sum_neglect_sec),
     !is.na(day_prior_hatch),
@@ -250,15 +334,22 @@ plot_occ <- data.frame(
   m_mu = mu_m_occ, m_low = PI_m_occ[1,], m_high = PI_m_occ[2,]
 )
 
+post_samples_occ <- sim(m_occ, data = d_occ)
+
+# Wybieramy jedną próbkę symulacji (0 lub 1) dla każdego wiersza danych
+D_occ$post_any_neglect <- post_samples_occ[1, ]
+
+# --- 2. Tworzenie wykresu p2 ---
 p2 <- ggplot() +
+  # Uncertainty Ribbons (95% PI dla średniej)
   geom_ribbon(data = plot_occ,
               aes(x = day, ymin = f_low, ymax = f_high),
               fill = col_female, alpha = 0.15) +
   geom_ribbon(data = plot_occ,
               aes(x = day, ymin = m_low, ymax = m_high),
               fill = col_male, alpha = 0.15) +
-  labs(title = "C)") +
   
+  # Mean Lines
   geom_line(data = plot_occ,
             aes(x = day, y = f_mu),
             color = col_female, linewidth = 1.2) +
@@ -266,27 +357,36 @@ p2 <- ggplot() +
             aes(x = day, y = m_mu),
             color = col_male, linewidth = 1.2) +
   
+  # Bubble Points - TERAZ Z POSTERIOR PREDICTIVE (0 lub 1)
   geom_count(data = D_occ,
              aes(x = day_prior_hatch,
-                 y = any_neglect,
+                 y = post_any_neglect, # Zmienione na dane symulowane
                  color = as.factor(sex_id)),
-             alpha = 0.4) +
+             alpha = 0.3,
+             # Dodajemy jitter, żeby bąbelki na 0 i 1 nie były "płaskimi" plackami
+             position = position_jitter(width = 0.15, height = 0.03)) +
   
+  # Manual Color Scales
   scale_color_manual(values = c("1" = col_female, "2" = col_male),
                      guide = "none") +
   
-  annotate("text", x = 28.8, y = 0.88,
-           label = "\u2642", size = 9,
+  # Sex Labels
+  annotate("text", x = 27.8, y = 0.7,
+           label = "\u2642", size = 10,
            color = col_male, fontface = "bold") +
-  annotate("text", x = 28.8, y = 0.75,
-           label = "\u2640", size = 9,
+  annotate("text", x = 27.8, y = 0.20,
+           label = "\u2640", size = 10,
            color = col_female, fontface = "bold") +
   
-  scale_x_reverse(breaks = seq(2, 28, by = 5)) +
-  ylim(0, 1) +
+  # Scaling and Labels
+  scale_x_reverse(breaks = seq(0, 30, by = 5)) +
+  # Dodajemy mały margines w coord_cartesian, żeby jitter nie "uciekał" poza oś
+  coord_cartesian(ylim = c(-0.1, 1.1)) +
+  scale_y_continuous(breaks = c(0, 0.5, 1)) +
   scale_size_continuous(name = "n obs", range = c(1, 6)) +
-  labs(x = "Days prior hatch", y = "Probability of neglect") +
+  labs(title = "C)", x = "Days prior hatch", y = "Probability of neglect") +
   
+  # Theme
   theme_bw(base_size = 12, base_family = "sans") +
   theme(
     panel.grid = element_blank(),
@@ -299,6 +399,7 @@ p2 <- ggplot() +
     legend.text = element_text(size = 10),
     plot.margin = margin(10, 10, 10, 10)
   )
+
 p2
 
 # --- 3A.5 Interpretation: Probability of Any Neglect ---
@@ -345,63 +446,12 @@ cat(
 # ---------------------------------------------------------
 # 3B. DURATION GIVEN NEGLECT > 0
 # ---------------------------------------------------------
+post_samples_log_dur <- sim(m_dur, data = d_dur)
 
-D_dur <- S %>%
-  filter(
-    !is.na(sum_neglect_sec),
-    sum_neglect_sec > 0,
-    !is.na(day_prior_hatch),
-    !is.na(sx),
-    day_prior_hatch >= 2,
-    day_prior_hatch <= 28
-  ) %>%
-  mutate(
-    sex_id = ifelse(sx == "f", 1, 2),
-    dph_c = day_prior_hatch - mean(day_prior_hatch),
-    neglect_log = log(sum_neglect_sec)
-  )
 
-d_dur <- list(
-  y = D_dur$neglect_log,
-  sex_id = D_dur$sex_id,
-  dph_c = D_dur$dph_c
-)
-
-m_dur <- quap(
-  alist(
-    y ~ dnorm(mu, sigma),
-    mu <- a[sex_id] + b[sex_id] * dph_c,
-    a[sex_id] ~ dnorm(6, 0.5),
-    b[sex_id] ~ dnorm(0, 0.1),
-    sigma ~ dexp(1)
-  ),
-  data = d_dur,
-  start = list(a = c(6,6), b = c(0,0), sigma = 1)
-)
-
-post_f_dur <- exp(link(m_dur, data = list(
-  sex_id = rep(1, 100),
-  dph_c = dph_seq_c_ov
-)))
-
-post_m_dur <- exp(link(m_dur, data = list(
-  sex_id = rep(2, 100),
-  dph_c = dph_seq_c_ov
-)))
-
-mu_f_dur <- apply(post_f_dur, 2, mean)
-mu_m_dur <- apply(post_m_dur, 2, mean)
-PI_f_dur <- apply(post_f_dur, 2, PI)
-PI_m_dur <- apply(post_m_dur, 2, PI)
-
-plot_df <- data.frame(
-  day = DAY_SEQ,
-  f_mu = mu_f_dur, f_low = PI_f_dur[1,], f_high = PI_f_dur[2,],
-  m_mu = mu_m_dur, m_low = PI_m_dur[1,], m_high = PI_m_dur[2,]
-)
+D_dur$post_sum_neglect_sec <- exp(post_samples_log_dur[1, ])
 
 p3 <- ggplot() +
-  # 1. Uncertainty Ribbons
   geom_ribbon(data = plot_df,
               aes(x = day, ymin = f_low, ymax = f_high),
               fill = col_female, alpha = 0.15) +
@@ -417,57 +467,45 @@ p3 <- ggplot() +
             aes(x = day, y = m_mu),
             color = col_male, linewidth = 1.2) +
   
-  # 3. Observation Bubbles 
-  # Using round() ensures that close values overlap to create "n obs" > 1
-  geom_point(data = D_dur,
+  # 3. Bubble Points - TERAZ Z POSTERIOR PREDICTIVE
+  # geom_count automatycznie pogrupuje podobne wartości symulowane
+  geom_count(data = D_dur,
              aes(x = day_prior_hatch,
-                 y = sum_neglect_sec,
+                 y = post_sum_neglect_sec, 
                  color = as.factor(sex_id)),
-             alpha = 0.4, 
-             size = 2) + #
+             alpha = 0.3) + 
   
-  # 4. Sex Annotations (Placed at the start of the lines)
-  annotate("text", x = 27.8, y = plot_df$m_mu[100] * 3, 
+  # 4. Sex Annotations
+  annotate("text", x = 27.8, y = plot_df$m_mu[100] * 2.4, 
            label = "\u2642", size = 10, color = col_male, fontface = "bold", family = "sans") +
-  annotate("text", x = 27.8, y = plot_df$f_mu[100] * 0.3, 
+  annotate("text", x = 27.8, y = plot_df$f_mu[100] * 0.4, 
            label = "\u2640", size = 10, color = col_female, fontface = "bold", family = "sans") +
+
+# 5. Scales and Labels
+scale_color_manual(values = c("1" = col_female, "2" = col_male), guide = "none") +
   
-  # 5. Scales and Labels
-  scale_color_manual(values = c("1" = col_female, "2" = col_male), guide = "none") +
-  scale_y_log10(labels = scales::label_number(),
-                breaks = scales::trans_breaks("log10", function(x) 10^x)) +
-  scale_x_reverse(breaks = seq(2, 28, by = 5)) +
+  scale_size_continuous(range = c(0.5, 2), guide = "none") + 
   
-  # 6. Size Legend (Fixed to whole numbers 1 and 2 only)
-  scale_size_continuous(name = "n obs", 
-                        range = c(1.5, 4), 
-                        breaks = c(1, 2),
-                        labels = c("1", "2")) +
-  
+  scale_y_log10(
+    breaks = c(100, 1000, 10000, 100000), 
+    labels = scales::label_comma(),
+    expand = expansion(mult = c(0.1, 0.1))
+  ) +
+  scale_x_reverse(breaks = seq(0, 30, by = 5)) +
   labs(title = "B)", 
        x = "Days prior hatch",
-       y = "Duration of neglect (sec, log scale)") +
+       y = "Duration of neglect events (sec, log scale)") +
   
-  # 7. Theme and Font Adjustments
+  # 7. Theme
   theme_bw(base_size = 12, base_family = "sans") +
   theme(
     panel.grid = element_blank(),
-    legend.position = c(0.90, 0.85),      # Nudged down slightly to avoid border
-    legend.background = element_blank(), 
-    legend.key = element_blank(),        # Transparent legend keys
-    
-    # Matching all text to Arial/Sans
-    axis.title.x = element_text(size = 13, family = "sans"),
-    axis.title.y = element_text(size = 13, family = "sans"),
-    axis.text.x = element_text(size = 11, color = "black", family = "sans"),
-    axis.text.y = element_text(size = 11, color = "black", family = "sans"),
-    
-    legend.title = element_text(size = 11, family = "sans"),
-    legend.text = element_text(size = 10, family = "sans"),
+    legend.position = "none", # Najpewniejszy sposób na usunięcie wszystkich legend
+    axis.title = element_text(size = 13),
+    axis.text = element_text(size = 11, color = "black"),
     plot.margin = margin(10, 10, 10, 10)
   )
 
-# View plot
 p3
 
 
@@ -515,23 +553,27 @@ cat(
 
 
 
-#save plots
+# Each letter on a new line stacks them vertically
+combined_plot <- "
+A
+B
+C
+"
+
 library(patchwork)
+# Assign your plots to the design
+# Note: Ensure p1 is your 'A', p3 is 'B', and p2 is 'C' based on your layout
+final_fig <- (p1 / p3 / p2) + 
+  plot_layout(design = combined_plot)
 
-#combined_plot <- "
-#AB
-#C#
-#"
+# Alternatively, the shorthand for vertical stacking is simply:
+# final_fig <- p1 / p3 / p2
 
-#final_fig <- (p1 + p3 + p2) +
-#  plot_layout(design = combined_plot)
-
-#final_fig
-# 5. Save as one high-res file
-#ggsave("Figure_1.png", final_fig, width = 14, height = 12, dpi = 600)
-
+# Save the figure - notice I swapped width and height 
+# to better suit a vertical orientation
+p1
 ggsave(
-  "Figure_1A_gap_frequency.png",
+  "Figure_1A_n_gaps.png",
   p1,
   width = 7,
   height = 6,
@@ -539,17 +581,67 @@ ggsave(
 )
 
 ggsave(
-  "Figure_1B_neglect_duration.png",
+  "Figure_1C_probability_neglect.png",
   p2,
   width = 7,
   height = 6,
   dpi = 600
 )
-
+p3
 ggsave(
-  "Figure_1C_probability_neglect.png",
+  "Figure_1B_neglect_duration.png",
   p3,
   width = 7,
   height = 6,
   dpi = 600
 )
+
+
+
+
+
+
+# 1. Function to strip existing text annotations from a plot
+remove_annotations <- function(p) {
+  p$layers <- Filter(function(x) !inherits(x$geom, "GeomText"), p$layers)
+  return(p)
+}
+
+# 2. Clean the plots (this removes the 'ghost' labels)
+p1_clean <- remove_annotations(p1)
+p2_clean <- remove_annotations(p2)
+p3_clean <- remove_annotations(p3)
+
+# 3. Re-define the style (No grid, tiny legend)
+final_style <- theme_bw(base_size = 9) + 
+  theme(
+    panel.grid = element_blank(),
+    legend.background = element_blank(),
+    legend.key = element_blank(),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 6),
+    legend.key.size = unit(0.2, "cm")
+  )
+
+# 4. Re-assemble with SINGLE set of labels
+pA_final <- p1_clean + 
+  annotate("text", x = 27.8, y = 1.8, label = "\u2642", size = 5, color = col_male) +
+  annotate("text", x = 27.8, y = 0.7, label = "\u2640", size = 5, color = col_female) +
+  scale_size_continuous(name = "n obs", range = c(0.5, 2.5)) +
+  final_style + theme(legend.position = c(0.88, 0.85), axis.title.x = element_blank())
+
+pB_final <- p3_clean + 
+  annotate("text", x = 27.8, y = plot_df$m_mu[100] * 3, label = "\u2642", size = 5, color = col_male) +
+  annotate("text", x = 27.8, y = plot_df$f_mu[100] * 0.3, label = "\u2640", size = 5, color = col_female) +
+  scale_size_continuous(range = c(1, 1)) +
+  final_style + theme(legend.position = "none", axis.title.x = element_blank())
+
+pC_final <- p2_clean + 
+  annotate("text", x = 27.8, y = 0.7, label = "\u2642", size = 5, color = col_male) +
+  annotate("text", x = 27.8, y = 0.20, label = "\u2640", size = 5, color = col_female) +
+  scale_size_continuous(name = "n obs", range = c(0.5, 2.5)) +
+  final_style + theme(legend.position = c(0.88, 0.72)) # Top right as requested
+
+# 5. Combine and Save
+final_fig <- pA_final / pB_final / pC_final
+ggsave("Figure_1_patched.png", final_fig, width = 3.5, height = 10, units = "in", dpi = 600)

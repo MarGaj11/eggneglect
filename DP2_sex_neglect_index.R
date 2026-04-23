@@ -626,3 +626,4 @@ gaps_attributed_hourly <- gaps_attributed %>%
   )
 
 saveRDS(gaps_attributed_hourly, "EDA_sex_gaps_hourly.RDS")
+saveRDS(gaps_attributed, "EDA_sex_gaps_table.RDS")

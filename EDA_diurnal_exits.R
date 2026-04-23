@@ -186,112 +186,148 @@ B_pred_scaled_sex <- scale(B_pred_sex, center = attr(B_scaled_sex, "scaled:cente
 basis_cols_sex <- setNames(as.data.frame(B_scaled_sex), paste0("B", 1:ncol(B_sex)))
 basis_list_sex <- as.list(setNames(as.data.frame(B_pred_scaled_sex), paste0("B", 1:ncol(B_sex))))
 
+E_fit_sex <- E_sex %>%
+  filter(!is.na(sex_id)) %>%
+  mutate(
+    hour_rad = 2 * pi * hour / 24,
+    sin_hour = sin(hour_rad),
+    cos_hour = cos(hour_rad)
+  )
+
+# Prediction grid: 24 integer hours for summaries, 200 points for plotting
+pred_grid_plot <- data.frame(hour = seq(0, 23, length.out = 200)) %>%
+  mutate(
+    hour_rad = 2 * pi * hour / 24,
+    sin_hour = sin(hour_rad),
+    cos_hour = cos(hour_rad)
+  )
+
+pred_grid_summary <- data.frame(hour = 0:23) %>%
+  mutate(
+    hour_rad = 2 * pi * hour / 24,
+    sin_hour = sin(hour_rad),
+    cos_hour = cos(hour_rad)
+  )
+
 # ------------------------------------------------------------------------------
 # 6. MODEL 1 (SEX DATA): SEX ONLY
 # ------------------------------------------------------------------------------
-d_m1_sex <- c(list(n_gaps_per_hour = E_fit_sex$n_gaps_per_hour, sex_id = E_fit_sex$sex_id), as.list(basis_cols_sex))
+d_circ <- list(
+  n_gaps_per_hour = E_fit_sex$n_gaps_per_hour,
+  sex_id   = E_fit_sex$sex_id,
+  sin_hour = E_fit_sex$sin_hour,
+  cos_hour = E_fit_sex$cos_hour
+)
 
-m1_sex <- quap(
+m_circ <- quap(
   alist(
     n_gaps_per_hour ~ dpois(lambda),
-    log(lambda) <- a[sex_id] + w1[sex_id]*B1 + w2[sex_id]*B2 + w3[sex_id]*B3 + 
-      w4[sex_id]*B4 + w5[sex_id]*B5 + w6[sex_id]*B6,
-    a[sex_id] ~ dnorm(0, 1),
-    w1[sex_id] ~ dnorm(0, 0.4), w2[sex_id] ~ dnorm(0, 0.4), w3[sex_id] ~ dnorm(0, 0.4),
-    w4[sex_id] ~ dnorm(0, 0.4), w5[sex_id] ~ dnorm(0, 0.4), w6[sex_id] ~ dnorm(0, 0.4)
+    log(lambda) <- a[sex_id] +
+      b_sin[sex_id] * sin_hour +
+      b_cos[sex_id] * cos_hour,
+    a[sex_id]     ~ dnorm(0, 1),
+    b_sin[sex_id] ~ dnorm(0, 1),
+    b_cos[sex_id] ~ dnorm(0, 1)
   ),
-  data = d_m1_sex, start = list(a=rep(0,2), w1=rep(0,2), w2=rep(0,2), w3=rep(0,2), w4=rep(0,2), w5=rep(0,2), w6=rep(0,2))
+  data  = d_circ,
+  start = list(a = rep(0,2), b_sin = rep(0,2), b_cos = rep(0,2))
 )
-
-hour_seq <- 0:23
 
 # Predictions for Females (sex_id = 1)
-post_f <- link(m1_sex, data = c(list(sex_id = rep(1, 24)), basis_list_sex))
-mu_f   <- apply(post_f, 2, mean)
-PI_f   <- apply(post_f, 2, PI, prob = 0.89)
+post_samples <- extract.samples(m_circ)
 
-# Predictions for Males (sex_id = 2)
-post_m <- link(m1_sex, data = c(list(sex_id = rep(2, 24)), basis_list_sex))
-mu_m   <- apply(post_m, 2, mean)
-PI_m   <- apply(post_m, 2, PI, prob = 0.89)
+post_f_plot <- link(m_circ, data = c(list(sex_id = rep(1, nrow(pred_grid_plot))),
+                                     as.list(pred_grid_plot[, c("sin_hour","cos_hour")])))
+post_m_plot <- link(m_circ, data = c(list(sex_id = rep(2, nrow(pred_grid_plot))),
+                                     as.list(pred_grid_plot[, c("sin_hour","cos_hour")])))
 
-# Combine into a clean dataframe for ggplot
-plot_hour_df <- data.frame(
-  hour   = hour_seq,
-  f_mu   = mu_f, 
-  f_low  = PI_f[1,], 
-  f_high = PI_f[2,],
-  m_mu   = mu_m, 
-  m_low  = PI_m[1,], 
-  m_high = PI_m[2,]
-)
+pred_grid_plot$f_mu   <- apply(post_f_plot, 2, mean)
+pred_grid_plot$f_low  <- apply(post_f_plot, 2, PI, prob = 0.89)[1,]
+pred_grid_plot$f_high <- apply(post_f_plot, 2, PI, prob = 0.89)[2,]
+pred_grid_plot$m_mu   <- apply(post_m_plot, 2, mean)
+pred_grid_plot$m_low  <- apply(post_m_plot, 2, PI, prob = 0.89)[1,]
+pred_grid_plot$m_high <- apply(post_m_plot, 2, PI, prob = 0.89)[2,]
 
-# --- 2. DEFINE COLORS ---
-col_female <- "darkorange"
-col_male   <- "navyblue"
+# Posterior for numerical summaries (24-hour grid)
+post_f_sum <- link(m_circ, data = c(list(sex_id = rep(1, 24)),
+                                    as.list(pred_grid_summary[, c("sin_hour","cos_hour")])))
+post_m_sum <- link(m_circ, data = c(list(sex_id = rep(2, 24)),
+                                    as.list(pred_grid_summary[, c("sin_hour","cos_hour")])))
 
-# --- 3. CREATE THE PLOT ---
-p_spline <- ggplot(plot_hour_df, aes(x = hour)) +
-  # Uncertainty Ribbons (89% PI)
-  geom_ribbon(aes(ymin = f_low, ymax = f_high), 
-              fill = col_female, alpha = 0.15) +
-  geom_ribbon(aes(ymin = m_low, ymax = m_high), 
-              fill = col_male, alpha = 0.15) +
-  
-  # Mean Lines (Spline trends)
-  geom_line(aes(y = f_mu), color = col_female, linewidth = 1.2) +
-  geom_line(aes(y = m_mu), color = col_male, linewidth = 1.2) +
-  
-  # Sex Labels in the expanded left gutter
-  # Y-positions are set to align near the start of the lines (~0.2 range)
-  annotate("text", x = 0.5, y = 0.17, 
-           label = "\u2642", size = 10, color = col_male, fontface = "bold", family = "sans") +
-  annotate("text", x = 0.5, y = 0.07, 
-           label = "\u2640", size = 10, color = col_female, fontface = "bold", family = "sans") +
-  
-  # X-Axis: Expanded to -2 to make room for labels
-  scale_x_continuous(breaks = seq(0, 23, by = 2), limits = c(0, 23)) +
-  
-  # Y-Axis: Fixed to model scale (0 to 0.3)
-  coord_cartesian(ylim = c(0, 0.25), clip = "off") +
-  
-  labs(x = "Hour of day", 
-       y = "Expected exits")+
-  
-  # Final Paper Theme Styling
-  theme_bw(base_size = 12, base_family = "sans") +
-  theme(
-    panel.grid = element_blank(),
-    axis.title.x = element_text(size = 13, family = "sans"),
-    axis.title.y = element_text(size = 13, family = "sans"),
-    axis.text.x  = element_text(size = 11, color = "black", family = "sans"),
-    axis.text.y  = element_text(size = 11, color = "black", family = "sans"),
-    plot.margin  = margin(10, 10, 10, 10) # Extra left margin for the sex icons
-  )
-
-# Display the plot
-print(p_spline)
-
-# Sex Rates & Peaks
-mu_f_m1 <- link(m1_sex, data = c(list(sex_id = rep(1, 24)), basis_list_sex))
-mu_m_m1 <- link(m1_sex, data = c(list(sex_id = rep(2, 24)), basis_list_sex))
-avg_rate_f_m1 <- apply(mu_f_m1, 1, mean); avg_rate_m_m1 <- apply(mu_m_m1, 1, mean); diff_fm_m1 <- avg_rate_f_m1 - avg_rate_m_m1
-cat("\n--- M1 SEX SUMMARY ---\n")
-cat("Female mean rate:", round(mean(avg_rate_f_m1), 3), "Male mean rate:", round(mean(avg_rate_m_m1), 3), "Diff:", round(mean(diff_fm_m1), 3), "\n")
+# Peak hour per posterior sample
 for (s in 1:2) {
-  pred_s <- link(m1_sex, data = c(list(sex_id = rep(s, 24)), basis_list_sex))
-  peak_h <- apply(pred_s, 1, which.max) - 1
+  post_s <- if (s == 1) post_f_sum else post_m_sum
+  peak_h <- apply(post_s, 1, which.max) - 1
   cat(sex_labels[s], "Peak Hour:", round(mean(peak_h), 1), "\n")
 }
 
+# Combine into a clean dataframe for ggplot
+
+col_female <- "darkorange"
+col_male   <- "navyblue"
+
+obs_means <- E_fit_sex %>%
+  group_by(sex_id, hour) %>%
+  summarise(mean_gaps = mean(n_gaps_per_hour), .groups = "drop") %>%
+  mutate(sex = ifelse(sex_id == 1, "f", "m"))
+
+p_sincos <- ggplot(pred_grid_plot, aes(x = hour)) +
+  geom_ribbon(aes(ymin = f_low, ymax = f_high), fill = col_female, alpha = 0.15) +
+  geom_ribbon(aes(ymin = m_low, ymax = m_high), fill = col_male,   alpha = 0.15) +
+  geom_line(aes(y = f_mu), color = col_female, linewidth = 1.2) +
+  geom_line(aes(y = m_mu), color = col_male,   linewidth = 1.2) +
+  # Raw observed means as points
+  geom_point(data = filter(obs_means, sex == "f"),
+             aes(x = hour, y = mean_gaps), color = col_female, alpha = 0.4, size = 1.5) +
+  geom_point(data = filter(obs_means, sex == "m"),
+             aes(x = hour, y = mean_gaps), color = col_male,   alpha = 0.4, size = 1.5) +
+  annotate("text", x = 0.5, y = max(pred_grid_plot$m_mu) * 1.13,
+           label = "\u2642", size = 10, color = col_male) +
+  annotate("text", x = 0.5, y = max(pred_grid_plot$f_mu) * 0.65,
+           label = "\u2640", size = 10, color = col_female) +
+  scale_x_continuous(breaks = seq(0, 23, by = 2), limits = c(0, 23)) +
+  coord_cartesian(ylim = c(0, 0.25), clip = "off") +
+  labs(x = "Hour of day", y = "Expected exits") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+# Display the plot
+print(p_sincos)
+
 ggsave(
   "Figure_2_diurnal_exit_pattern.png",
-  p_spline,
+  p_sincos,
   width = 7,
   height = 6,
   dpi = 600
 )
 
+# Calculate the hourly difference (Male - Female)
+# This results in a matrix where rows = posterior samples, columns = hours (0-23)
+phase_f <- atan2(post_samples$b_sin[,1], post_samples$b_cos[,1]) * 24 / (2 * pi)
+phase_m <- atan2(post_samples$b_sin[,2], post_samples$b_cos[,2]) * 24 / (2 * pi)
+phase_diff <- phase_f - phase_m
+
+cat("Female phase (hours):", round(mean(phase_f), 2),
+    " 89% PI [", round(PI(phase_f, prob = 0.89), 2), "]\n")
+cat("Male phase (hours):  ", round(mean(phase_m), 2),
+    " 89% PI [", round(PI(phase_m, prob = 0.89), 2), "]\n")
+cat("Phase difference (F-M):", round(mean(phase_diff), 2),
+    " 89% PI [", round(PI(phase_diff, prob = 0.89), 2), "]\n")
+cat("P(|phase diff| < 1 hour):", round(mean(abs(phase_diff) < 1), 3), "\n")
+
+# Find the hour with the maximum difference
+avg_rate_f_circ <- apply(post_f_sum, 1, mean)
+avg_rate_m_circ <- apply(post_m_sum, 1, mean)
+diff_fm_circ    <- avg_rate_f_circ - avg_rate_m_circ
+
+cat("Female mean rate:", round(mean(avg_rate_f_circ), 3),
+    " 89% PI [", round(PI(avg_rate_f_circ, prob = 0.89), 3), "]\n")
+cat("Male mean rate:  ", round(mean(avg_rate_m_circ), 3),
+    " 89% PI [", round(PI(avg_rate_m_circ, prob = 0.89), 3), "]\n")
+cat("Difference (F-M):", round(mean(diff_fm_circ), 3),
+    " 89% PI [", round(PI(diff_fm_circ, prob = 0.89), 3), "]\n")
+cat("P(Female < Male):", round(mean(diff_fm_circ < 0), 3), "\n")
 
 # ------------------------------------------------------------------------------
 # 7. MODEL 2 (SEX DATA): SEX X STAGE

@@ -10,6 +10,7 @@ rm(list = ls())
 
 #ngl_dt_trimmed <- readRDS("./EDA_egg_neglect_index_neglect_table_trimmed.RDS") 
 ngl_dt <- readRDS("./EDA_egg_neglect_index_neglect_table.RDS") 
+head(ngl_dt)
 
 #n_gaps <- counts, poisson distribution
 #sum_gaps <- positive, continous, skewed(gamma-like)
@@ -104,3 +105,36 @@ chi_results_table <- coverage %>%
   )
 
 print(chi_results_table)
+
+
+# Transform hourly data into a wide format (Nest by Hour)
+nest_balance_table <- ngl_dt_hours %>%
+  group_by(season, session, nest, hour) %>%
+  summarise(n_obs = n(), .groups = "drop") %>%
+  pivot_wider(names_from = hour, values_from = n_obs, values_fill = 0)
+
+# Example of what this looks like:
+# Nest | Hr0 | Hr1 | Hr2 | Hr3 ...
+# A    | 2   | 2   | 2   | 3   ...
+# B    | 2   | 2   | 3   | 2   ...
+
+nest_comparison_results <- nest_balance_table %>%
+  group_by(season, session) %>%
+  do(tidy_test = {
+    # Extract only the hour columns (numeric)
+    dat <- as.matrix(select(., matches("^[0-9]")))
+    
+    # Run Chi-square on the matrix of counts
+    # If the distribution of hours is the same across nests, p > 0.05
+    test <- chisq.test(dat)
+    
+    data.frame(
+      chi_stat = test$statistic,
+      p_value = test$p.value,
+      n_nests = nrow(.)
+    )
+  }) %>%
+  unnest(tidy_test) %>%
+  mutate(Comparable = ifelse(p_value > 0.05, "Yes (Fair)", "No (Biased)"))
+
+print(nest_comparison_results)

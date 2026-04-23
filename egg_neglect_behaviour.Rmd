@@ -17,20 +17,22 @@ output:
 
 # Diurnal pattern of exits (neglect, frequency) in Little Auk
 
-In this section, we analyze the pattern of exiting the nest during incubation to determine the general rhytm and if there are sex-specific differences in the diurnal rhythm of nest exits.
+In this section, we analyze the pattern of exiting the nest during incubation to determine the general rhythm and if there are sex-specific differences in the diurnal rhythm of nest exits.
 
-Model and results 
+## Model and results
 
-To model the diurnal pattern of exits, we used a Bayesian Poisson GLM with B-splines. The model structure is defined as follows:
+To model the diurnal pattern of exits, we used a Bayesian Poisson GLM with circular (sine/cosine) encoding of hour, which correctly handles the cyclic nature of time-of-day (i.e., hour 23 is adjacent to hour 0). The model structure is defined as follows:
 
 $$\begin{aligned}
 G_{i} &\sim \text{Poisson}(\lambda_i) \\
-\log(\lambda_i) &= \alpha_{sex[i]} + \sum_{k=1}^{6} w_{k, sex[i]} B_{k,i} \\
+\log(\lambda_i) &= \alpha_{sex[i]} + \beta^{sin}_{sex[i]} \sin(h_i) + \beta^{cos}_{sex[i]} \cos(h_i) \\
+h_i &= \frac{2\pi \cdot \text{hour}_i}{24} \\
 \alpha_j &\sim \text{Normal}(0, 1) \\
-w_{k,j} &\sim \text{Normal}(0, 0.4)
+\beta^{sin}_j &\sim \text{Normal}(0, 1) \\
+\beta^{cos}_j &\sim \text{Normal}(0, 1)
 \end{aligned}$$
 
-Where $G_i$ is the number of gaps (exits) per hour, $\alpha$ is the sex-specific intercept, and $w_k$ are the weights for the spline basis $B_k$.
+Where $G_i$ is the number of gaps (exits) per hour, $\alpha_j$ is the sex-specific intercept, and $\beta^{sin}_j$, $\beta^{cos}_j$ are sex-specific weights on the sine and cosine projections of hour, capturing the amplitude and phase of the daily cycle.
 
 ```{r load-libraries, message=FALSE, warning=FALSE}
 library(rethinking)
@@ -46,7 +48,7 @@ sex_labels   <- c("Female", "Male")
 sex_col      <- c("darkorange", "navyblue")
 
 # ------------------------------------------------------------------------------
-# 2. NEST-LEVEL DATA PREPARATION
+# NEST-LEVEL DATA PREPARATION
 # ------------------------------------------------------------------------------
 E <- readRDS("./EDA_exit_hourly.RDS")
 
@@ -66,29 +68,8 @@ E <- E %>%
     ))
   )
 
-# Define Spline Basis (Hour sequence 0-23)
-hour_seq <- 0:23
-basis    <- bs(hour_seq, df = 6, degree = 3, intercept = FALSE)
-basis_cols <- as.data.frame(basis)
-colnames(basis_cols) <- paste0("B", 1:6)
-basis_list <- as.list(basis_cols)
-
-E_basis <- bind_cols(E, basis_cols[match(E$hour, hour_seq), ])
-
-# --- PRIOR PREDICTIVE SIMULATION (M2) ---
-set.seed(10)
-plot(NULL, xlim=c(0,23), ylim=c(0,5), xlab="Hour", ylab="Expected exits", xaxt="n", main="Prior check")
-axis(1, at=0:23)
-for(i in 1:50){
-  a_sim <- rnorm(1, 0, 0.8)
-  ws_sim <- rnorm(6, 0, 0.5)
-  mu_sim <- exp(a_sim + as.matrix(basis_cols) %*% ws_sim)
-  lines(hour_seq, mu_sim, col=col.alpha("black", 0.25))
-}
-
-
 # ------------------------------------------------------------------------------
-# 5. SEX-SPECIFIC DATA PREPARATION
+# SEX-SPECIFIC DATA PREPARATION
 # ------------------------------------------------------------------------------
 S <- readRDS("EDA_sex_neglect_wide.RDS")
 G <- readRDS("EDA_sex_gaps_hourly.RDS")
@@ -118,103 +99,167 @@ E_sex <- meta %>% crossing(hour = 0:23) %>%
   left_join(sex_hourly_raw, by = c("season", "session", "nest", "sx", "hour")) %>%
   mutate(n_gaps_per_hour = replace_na(n_gaps_per_hour, 0))
 
-E_by_sex <- E_sex %>% group_by(sex_id, hour) %>% summarise(mean_gaps = mean(n_gaps_per_hour), .groups = "drop")
-E_stage_sex <- E_sex %>% group_by(stage_sex_id, hour) %>% summarise(mean_gaps = mean(n_gaps_per_hour), .groups = "drop")
+# Add circular encoding to model data
+E_fit_sex <- E_sex %>%
+  filter(!is.na(sex_id)) %>%
+  mutate(
+    hour_rad = 2 * pi * hour / 24,
+    sin_hour = sin(hour_rad),
+    cos_hour = cos(hour_rad)
+  )
 
-# Re-scaling Splines for Sex Data
-E_fit_sex <- E_sex %>% filter(!is.na(sex_id))
-B_sex <- bs(E_fit_sex$hour, df = 6, degree = 3, intercept = TRUE)
-B_pred_sex <- bs(hour_seq, knots = attr(B_sex, "knots"), Boundary.knots = attr(B_sex, "Boundary.knots"), degree = 3, intercept = TRUE)
-B_scaled_sex <- scale(B_sex)
-B_pred_scaled_sex <- scale(B_pred_sex, center = attr(B_scaled_sex, "scaled:center"), scale = attr(B_scaled_sex, "scaled:scale"))
-basis_cols_sex <- setNames(as.data.frame(B_scaled_sex), paste0("B", 1:ncol(B_sex)))
-basis_list_sex <- as.list(setNames(as.data.frame(B_pred_scaled_sex), paste0("B", 1:ncol(B_sex))))
+# Prediction grid: 24 integer hours for summaries, 200 points for plotting
+pred_grid_plot <- data.frame(hour = seq(0, 23, length.out = 200)) %>%
+  mutate(
+    hour_rad = 2 * pi * hour / 24,
+    sin_hour = sin(hour_rad),
+    cos_hour = cos(hour_rad)
+  )
 
-
+pred_grid_summary <- data.frame(hour = 0:23) %>%
+  mutate(
+    hour_rad = 2 * pi * hour / 24,
+    sin_hour = sin(hour_rad),
+    cos_hour = cos(hour_rad)
+  )
 ```
 
+```{r fit-m-circ, include=FALSE, cache=TRUE}
+d_circ <- list(
+  n_gaps_per_hour = E_fit_sex$n_gaps_per_hour,
+  sex_id   = E_fit_sex$sex_id,
+  sin_hour = E_fit_sex$sin_hour,
+  cos_hour = E_fit_sex$cos_hour
+)
 
-```{r fit-m1-sex, include=FALSE, cache=TRUE}
-# --- MODEL 1: SEX ONLY ---
-d_m1_sex <- c(list(n_gaps_per_hour = E_fit_sex$n_gaps_per_hour, sex_id = E_fit_sex$sex_id), as.list(basis_cols_sex))
-
-m1_sex <- quap(
+m_circ <- quap(
   alist(
     n_gaps_per_hour ~ dpois(lambda),
-    log(lambda) <- a[sex_id] + w1[sex_id]*B1 + w2[sex_id]*B2 + w3[sex_id]*B3 + 
-      w4[sex_id]*B4 + w5[sex_id]*B5 + w6[sex_id]*B6,
-    a[sex_id] ~ dnorm(0, 1),
-    w1[sex_id] ~ dnorm(0, 0.4), w2[sex_id] ~ dnorm(0, 0.4), w3[sex_id] ~ dnorm(0, 0.4),
-    w4[sex_id] ~ dnorm(0, 0.4), w5[sex_id] ~ dnorm(0, 0.4), w6[sex_id] ~ dnorm(0, 0.4)
+    log(lambda) <- a[sex_id] +
+                   b_sin[sex_id] * sin_hour +
+                   b_cos[sex_id] * cos_hour,
+    a[sex_id]     ~ dnorm(0, 1),
+    b_sin[sex_id] ~ dnorm(0, 1),
+    b_cos[sex_id] ~ dnorm(0, 1)
   ),
-  data = d_m1_sex, 
-  start = list(a=rep(0,2), w1=rep(0,2), w2=rep(0,2), w3=rep(0,2), w4=rep(0,2), w5=rep(0,2), w6=rep(0,2))
+  data  = d_circ,
+  start = list(a = rep(0,2), b_sin = rep(0,2), b_cos = rep(0,2))
 )
 ```
 
-
 ```{r posterior-predictions, include=TRUE}
-post_f <- link(m1_sex, data = c(list(sex_id = rep(1, 24)), basis_list_sex))
-mu_f   <- apply(post_f, 2, mean)
-PI_f   <- apply(post_f, 2, PI, prob = 0.89)
+# Posterior for plotting (200-point grid)
+post_f_plot <- link(m_circ, data = c(list(sex_id = rep(1, nrow(pred_grid_plot))),
+                                      as.list(pred_grid_plot[, c("sin_hour","cos_hour")])))
+post_m_plot <- link(m_circ, data = c(list(sex_id = rep(2, nrow(pred_grid_plot))),
+                                      as.list(pred_grid_plot[, c("sin_hour","cos_hour")])))
 
-# Predictions for Males (sex_id = 2)
-post_m <- link(m1_sex, data = c(list(sex_id = rep(2, 24)), basis_list_sex))
-mu_m   <- apply(post_m, 2, mean)
-PI_m   <- apply(post_m, 2, PI, prob = 0.89)
+pred_grid_plot$f_mu   <- apply(post_f_plot, 2, mean)
+pred_grid_plot$f_low  <- apply(post_f_plot, 2, PI, prob = 0.89)[1,]
+pred_grid_plot$f_high <- apply(post_f_plot, 2, PI, prob = 0.89)[2,]
+pred_grid_plot$m_mu   <- apply(post_m_plot, 2, mean)
+pred_grid_plot$m_low  <- apply(post_m_plot, 2, PI, prob = 0.89)[1,]
+pred_grid_plot$m_high <- apply(post_m_plot, 2, PI, prob = 0.89)[2,]
 
-mu_f_m1 <- link(m1_sex, data = c(list(sex_id = rep(1, 24)), basis_list_sex))
-mu_m_m1 <- link(m1_sex, data = c(list(sex_id = rep(2, 24)), basis_list_sex))
-avg_rate_f_m1 <- apply(mu_f_m1, 1, mean); avg_rate_m_m1 <- apply(mu_m_m1, 1, mean); diff_fm_m1 <- avg_rate_f_m1 - avg_rate_m_m1
+# Posterior for numerical summaries (24-hour grid)
+post_f_sum <- link(m_circ, data = c(list(sex_id = rep(1, 24)),
+                                     as.list(pred_grid_summary[, c("sin_hour","cos_hour")])))
+post_m_sum <- link(m_circ, data = c(list(sex_id = rep(2, 24)),
+                                     as.list(pred_grid_summary[, c("sin_hour","cos_hour")])))
+
+# Peak hour per posterior sample
 for (s in 1:2) {
-  pred_s <- link(m1_sex, data = c(list(sex_id = rep(s, 24)), basis_list_sex))
-  peak_h <- apply(pred_s, 1, which.max) - 1
+  post_s <- if (s == 1) post_f_sum else post_m_sum
+  peak_h <- apply(post_s, 1, which.max) - 1
   cat(sex_labels[s], "Peak Hour:", round(mean(peak_h), 1), "\n")
 }
 ```
 
-```{r results-mean-rates}
-avg_rate_f_m1 <- apply(post_f, 1, mean)
-avg_rate_m_m1 <- apply(post_m, 1, mean)
-diff_fm_m1    <- avg_rate_f_m1 - avg_rate_m_m1
 
-cat("Female mean rate:", round(mean(avg_rate_f_m1), 3),
-    " 89% PI [", round(PI(avg_rate_f_m1, prob=0.89), 3), "]\n")
-cat("Male mean rate:  ", round(mean(avg_rate_m_m1), 3),
-    " 89% PI [", round(PI(avg_rate_m_m1, prob=0.89), 3), "]\n")
-cat("Difference (F-M):", round(mean(diff_fm_m1), 3),
-    " 89% PI [", round(PI(diff_fm_m1, prob=0.89), 3), "]\n")
-cat("P(Female < Male):", round(mean(diff_fm_m1 < 0), 3), "\n")
+```{r results-exit-pattern}
+post_samples <- extract.samples(m_circ)
+
+# Phase = atan2(b_sin, b_cos) converted to hours
+phase_f <- atan2(post_samples$b_sin[,1], post_samples$b_cos[,1]) * 24 / (2 * pi)
+phase_m <- atan2(post_samples$b_sin[,2], post_samples$b_cos[,2]) * 24 / (2 * pi)
+phase_diff <- phase_f - phase_m
+
+cat("Female phase (hours):", round(mean(phase_f), 2),
+    " 89% PI [", round(PI(phase_f, prob = 0.89), 2), "]\n")
+cat("Male phase (hours):  ", round(mean(phase_m), 2),
+    " 89% PI [", round(PI(phase_m, prob = 0.89), 2), "]\n")
+cat("Phase difference (F-M):", round(mean(phase_diff), 2),
+    " 89% PI [", round(PI(phase_diff, prob = 0.89), 2), "]\n")
+cat("P(|phase diff| < 1 hour):", round(mean(abs(phase_diff) < 1), 3), "\n")
+```
+
+
+
+Peak exit timing did not differ credibly between sexes (phase difference: 0.31 h, 89% PI [−1.66, 2.26]), whereas exit rate was consistently higher in males across all hours (difference: −0.034 gaps/hour, 89% PI [−0.043, −0.024]; P(Female < Male) = 1.0).
+
+
+```{r results-mean-rates}
+avg_rate_f_circ <- apply(post_f_sum, 1, mean)
+avg_rate_m_circ <- apply(post_m_sum, 1, mean)
+diff_fm_circ    <- avg_rate_f_circ - avg_rate_m_circ
+
+cat("Female mean rate:", round(mean(avg_rate_f_circ), 3),
+    " 89% PI [", round(PI(avg_rate_f_circ, prob = 0.89), 3), "]\n")
+cat("Male mean rate:  ", round(mean(avg_rate_m_circ), 3),
+    " 89% PI [", round(PI(avg_rate_m_circ, prob = 0.89), 3), "]\n")
+cat("Difference (F-M):", round(mean(diff_fm_circ), 3),
+    " 89% PI [", round(PI(diff_fm_circ, prob = 0.89), 3), "]\n")
+cat("P(Female < Male):", round(mean(diff_fm_circ < 0), 3), "\n")
 ```
 
 Males initiated gaps at a notably higher rate than females across the day (male mean: 0.121 gaps/hour, 89% PI [0.113, 0.128]; female mean: 0.087 gaps/hour, 89% PI [0.081, 0.093]). The difference was consistent and credible, with females showing reliably fewer exits than males (difference: −0.034, 89% PI [−0.043, −0.025]; P(Female < Male) = 1.0).
 
 Both sexes showed a similar diel pattern, with gap frequency peaking in the early morning hours (female peak: ~5 AM, male peak: ~6 AM), suggesting a shared response to time-of-day cues rather than sex-specific scheduling of nest attendance.
 
-
 ```{r plot-hourly-gaps-by-sex, fig.width=7, fig.height=4, fig.cap="Expected number of exits per hour by sex"}
-plot_hour_df <- data.frame(
-  hour   = hour_seq,
-  f_mu   = apply(post_f, 2, mean), 
-  f_low  = apply(post_f, 2, PI, prob = 0.89)[1,], 
-  f_high = apply(post_f, 2, PI, prob = 0.89)[2,],
-  m_mu   = apply(post_m, 2, mean), 
-  m_low  = apply(post_m, 2, PI, prob = 0.89)[1,], 
-  m_high = apply(post_m, 2, PI, prob = 0.89)[2,]
-)
-
 col_female <- "darkorange"
 col_male   <- "navyblue"
 
-ggplot(plot_hour_df, aes(x = hour)) +
+obs_means <- E_fit_sex %>%
+  group_by(sex_id, hour) %>%
+  summarise(mean_gaps = mean(n_gaps_per_hour), .groups = "drop") %>%
+  mutate(sex = ifelse(sex_id == 1, "f", "m"))
+
+ggplot(pred_grid_plot, aes(x = hour)) +
   geom_ribbon(aes(ymin = f_low, ymax = f_high), fill = col_female, alpha = 0.15) +
-  geom_ribbon(aes(ymin = m_low, ymax = m_high), fill = col_male, alpha = 0.15) +
+  geom_ribbon(aes(ymin = m_low, ymax = m_high), fill = col_male,   alpha = 0.15) +
   geom_line(aes(y = f_mu), color = col_female, linewidth = 1.2) +
-  geom_line(aes(y = m_mu), color = col_male, linewidth = 1.2) +
-  annotate("text", x = 0.5, y = 0.17, label = "\u2642", size = 10, color = col_male) +
-  annotate("text", x = 0.5, y = 0.07, label = "\u2640", size = 10, color = col_female) +
+  geom_line(aes(y = m_mu), color = col_male,   linewidth = 1.2) +
+  # Raw observed means as points
+  geom_point(data = filter(obs_means, sex == "f"),
+             aes(x = hour, y = mean_gaps), color = col_female, alpha = 0.4, size = 1.5) +
+  geom_point(data = filter(obs_means, sex == "m"),
+             aes(x = hour, y = mean_gaps), color = col_male,   alpha = 0.4, size = 1.5) +
+  annotate("text", x = 0.5, y = max(pred_grid_plot$m_mu) * 1.13,
+           label = "\u2642", size = 10, color = col_male) +
+  annotate("text", x = 0.5, y = max(pred_grid_plot$f_mu) * 0.65,
+           label = "\u2640", size = 10, color = col_female) +
   scale_x_continuous(breaks = seq(0, 23, by = 2), limits = c(0, 23)) +
   coord_cartesian(ylim = c(0, 0.25), clip = "off") +
+  labs(x = "Hour of day", y = "Expected exits") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+```
+
+Diurnal pattern of nest exits during incubation by sex. Lines show the posterior mean expected number of exits per hour for females (orange) and males (navy), derived from a Bayesian Poisson GLM with circular (sine/cosine) hour encoding. Shaded ribbons represent 89% posterior credible intervals. Points show observed hourly means averaged across all nest-sessions for each sex. Males exited the nest at a consistently higher rate than females across the day, while the overall shape of the diel cycle — including the early-morning peak — was similar between sexes.
+
+```{r plot-hourly-gaps-by-sex2, fig.width=7, fig.height=4, fig.cap="Expected number of exits per hour by sex"}
+ggplot(pred_grid_plot, aes(x = hour)) +
+  geom_ribbon(aes(ymin = f_low, ymax = f_high), fill = col_female, alpha = 0.15) +
+  geom_ribbon(aes(ymin = m_low, ymax = m_high), fill = col_male,   alpha = 0.15) +
+  geom_line(aes(y = f_mu), color = col_female, linewidth = 1.2) +
+  geom_line(aes(y = m_mu), color = col_male,   linewidth = 1.2) +
+  geom_point(data = filter(obs_means, sex == "f"),
+             aes(x = hour, y = mean_gaps), color = col_female, alpha = 0.4, size = 1.5) +
+  geom_point(data = filter(obs_means, sex == "m"),
+             aes(x = hour, y = mean_gaps), color = col_male,   alpha = 0.4, size = 1.5) +
+  scale_x_continuous(breaks = seq(0, 23, by = 2), limits = c(0, 23)) +
+  coord_polar() +
   labs(x = "Hour of day", y = "Expected exits") +
   theme_bw() +
   theme(panel.grid = element_blank())
@@ -241,15 +286,40 @@ Where $N_i$ is the number of gaps on observation $i$, $\text{dph}_c$ is days pri
 ```{r prepare-neglect-data, include=FALSE}
 S <- readRDS("EDA_sex_neglect_wide.RDS")
 E <- readRDS("./EDA_egg_neglect_index_neglect_table.RDS")
+G <- readRDS("./EDA_sex_gaps_table.RDS")
+
 
 DAY_SEQ <- seq(2, 28, length.out = 100)
+
+G_summary <- G %>%
+  filter(dur >= 300) %>%
+  group_by(season, session, nest, responsible_sex) %>%
+  summarise(
+    n_gaps = n(),
+    sum_neglect_sec = sum(dur),
+    mean_neglect_sec = mean(dur),
+    .groups = "drop"
+  ) %>%
+  rename(sx = responsible_sex)
+
+# Replace the neglect columns in S with the filtered versions
+S_filt <- S %>%
+  select(-n_gaps, -sum_neglect_sec, -mean_neglect_sec) %>%
+  left_join(G_summary, by = c("season", "session", "nest", "sx")) %>%
+  mutate(
+    sum_neglect_sec = replace_na(sum_neglect_sec, 0),
+    mean_neglect_sec = replace_na(mean_neglect_sec, 0),
+    n_gaps = replace_na(n_gaps, 0L)
+  )
 
 E_fit_overall <- E %>%
   filter(!is.na(day_prior_hatch), !is.na(n_gaps),
          day_prior_hatch >= 2, day_prior_hatch <= 28) %>%
   mutate(dph_c = day_prior_hatch - mean(day_prior_hatch))
 
-E_fit_sex <- S %>%
+d_overall <- list(n_gaps = E_fit_overall$n_gaps, dph_c = E_fit_overall$dph_c)
+
+E_fit_sex <- S_filt %>%
   filter(!is.na(day_prior_hatch), !is.na(sx),
          day_prior_hatch >= 2, day_prior_hatch <= 28) %>%
   mutate(
@@ -257,14 +327,64 @@ E_fit_sex <- S %>%
     dph_c  = day_prior_hatch - mean(day_prior_hatch)
   )
 
-dph_seq_c_ov <- DAY_SEQ - mean(E_fit_overall$day_prior_hatch)
+```
+
+```{r duration_of_gaps}
+#plot to see the duration of absences
+G$duration_category <- cut(
+  G$dur, 
+  breaks = c(0, 300, 600, 900, 1800, 2700, 3600, 7200, Inf), 
+  labels = c("0-5 min", "5-10 min", "10-15 min", "15-30 min", "30-45 min", "45-60 min", "1-2 hours", "2+ hours"),
+  right = FALSE
+)
+
+# 1. Przygotowanie danych (upewnienie się, że kolory są zdefiniowane)
+col_female <- "darkorange" 
+col_male   <- "navyblue"
+
+# 2. Tworzenie wykresu
+ggplot(G[!is.na(G$duration_category), ], aes(x = duration_category, fill = responsible_sex)) +
+  # Słupki z kolorami przypisanymi do płci
+  geom_bar(color = "black", linewidth = 0.3, alpha = 0.8) +
+  
+  # Rozdzielenie na panele (płeć)
+  facet_wrap(~responsible_sex, labeller = as_labeller(c(f = "Females", m = "Males"))) +
+  
+  # Manualne przypisanie kolorów, aby pasowały do linii trendu
+  scale_fill_manual(values = c(f = col_female, m = col_male), guide = "none") +
+  
+  # Opisy
+  labs(
+    x = "Duration interval", 
+    y = "Number of neglect gaps"
+  ) +
+  
+  # --- THE "PRETTY" ADJUSTMENTS (Zgodne z p1, p2, p3) ---
+  theme_bw(base_size = 12, base_family = "sans") +
+  theme(
+    panel.grid = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold", size = 13),
+    
+    # Formatowanie osi
+    axis.title.x = element_text(size = 13, family = "sans", color = "black"),
+    axis.title.y = element_text(size = 13, family = "sans", color = "black"),
+    axis.text.x = element_text(size = 10, angle = 45, hjust = 1, color = "black"),
+    axis.text.y = element_text(size = 11, color = "black"),
+    
+    plot.title = element_text(face = "bold", size = 16),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
 ```
 
 
 ```{r prior-check-frequency, fig.width=6, fig.height=4, fig.cap="Prior predictive simulation for gap frequency model"}
 set.seed(123)
+dph_seq_c_ov <- DAY_SEQ - mean(E_fit_overall$day_prior_hatch)
 n_sim <- 100
 prior_mu_ov <- matrix(NA, nrow = n_sim, ncol = length(DAY_SEQ))
+
 
 for(i in 1:n_sim){
   a <- rnorm(1, 1, 0.5)
@@ -275,7 +395,7 @@ for(i in 1:n_sim){
 matplot(DAY_SEQ, t(prior_mu_ov), type = "l", lty = 1, xlim = c(28, 2),
         col = col.alpha("black", 0.3),
         xlab = "Days prior hatch", ylab = "Expected n_gaps",
-        main = "Prior check: gap frequency")
+        main = "Prior check: gap frequency")#
 ```
 
 ```{r fit-frequency-models, include=FALSE, cache=TRUE}
@@ -299,7 +419,7 @@ m_sex <- quap(
     a[sex_id] ~ dnorm(1, 0.5),
     b[sex_id] ~ dnorm(0, 0.1)
   ), data = d_sex, start = list(a = c(0,0), b = c(0,0))
-)
+)#
 ```
 
 
@@ -317,7 +437,7 @@ plot_gaps_df <- data.frame(
 )
 
 post_s_samp <- extract.samples(m_sex)
-gap_diff    <- exp(post_s_samp$a[,1]) - exp(post_s_samp$a[,2])
+gap_diff    <- exp(post_s_samp$a[,1]) - exp(post_s_samp$a[,2]) #
 ```
 
 
@@ -333,20 +453,9 @@ cat("Mean gap diff (F-M):", round(mean(gap_diff), 2),
 cat("P(Female > Male baseline):", mean(post_s_samp$a[,1] > post_s_samp$a[,2]), "\n")
 ```
 
-Both sexes showed a consistent decrease in gap frequency as incubation
-progressed toward hatching. Female gap frequency increased by 0.059 per day
-(89% PI [0.050, 0.069]; P(slope < 0) = 0), and males showed a similarly
-positive trend of 0.068 per day (89% PI [0.060, 0.077]; P(slope < 0) = 0),
-suggesting both parents become progressively more attentive as the egg
-approaches hatching.
+Both sexes showed a consistent change in gap frequency across incubation. Because time is measured on a reversed scale (0 = hatching), the positive slopes indicate that gap frequency decreases as hatching approaches. Female gap frequency increased by 0.082 per day (89% PI [0.061, 0.104]; P(slope < 0) = 0), and males showed a very similar trend of 0.078 per day (89% PI [0.059, 0.098]; P(slope < 0) = 0). This indicates that neglect becomes less frequent closer to hatching, reflecting increasing parental attentiveness in both sexes.
 
-Males initiated more gaps than females throughout incubation, with a baseline
-difference of −0.66 gaps per day (89% PI [−0.88, −0.43]; P(Female > Male) = 0),
-indicating that the male-biased pattern of nest leaving established in the
-diurnal analysis persists across the entire incubation period. The slopes of
-both sexes were similar, suggesting the sex difference in gap frequency is
-relatively stable across incubation rather than diverging or converging as
-hatching approaches.
+Males initiated slightly more gaps than females throughout incubation, but this difference was small and uncertain, with a baseline difference of −0.07 gaps per day (89% PI [−0.16, 0.02]; P(Female > Male) = 0.12). The credible interval overlaps zero, suggesting weak evidence for a consistent sex difference after filtering short gaps. The slopes of both sexes were nearly identical, indicating that any sex difference remains stable across incubation rather than diverging or converging.
 
 ```{r plot-frequency, fig.width=7, fig.height=5, fig.cap="Expected number of neglect gaps per day by sex across incubation", warning=FALSE}
 col_female <- "darkorange"; col_male <- "navyblue"
@@ -355,52 +464,59 @@ col_female <- "darkorange"
 col_male   <- "navyblue" 
 
 # 3. Create the Plot
+
+# Symulujemy obserwacje (n_gaps) dla każdego punktu w oryginalnych danych
+# m_sex to Twój dopasowany model quap
+post_samples <- sim(m_sex, data = d_sex)
+# Bierzemy losową próbkę symulacji (np. pierwszą), aby pokazać realistyczny rozrzut
+E_fit_sex$post_n_gaps <- post_samples[1, ]
+
+# 2. Tworzenie wykresu
 ggplot() +
-  # Ribbons
+  # --- 1. Wstęgi Niepewności ---
   geom_ribbon(data = plot_gaps_df, aes(x = day, ymin = f_low, ymax = f_high),  
               fill = col_female, alpha = 0.15) +
   geom_ribbon(data = plot_gaps_df, aes(x = day, ymin = m_low, ymax = m_high),  
               fill = col_male, alpha = 0.15) +
-  labs(title = "A)")+
   
-  # Mean Lines
-  geom_line(data = plot_gaps_df, aes(x = day, y = f_mu), color = col_female, linewidth = 1.2) +
-  geom_line(data = plot_gaps_df, aes(x = day, y = m_mu), color = col_male, linewidth = 1.2) +
+  # --- 2. Linie Trendu (Średnie) ---
+  geom_line(data = plot_gaps_df, aes(x = day, y = f_mu), 
+            color = col_female, linewidth = 1.2) +
+  geom_line(data = plot_gaps_df, aes(x = day, y = m_mu), 
+            color = col_male, linewidth = 1.2) +
   
-  # Bubble Points (Raw n_gaps data)
-  geom_count(data = E_fit_sex, aes(x = day_prior_hatch, y = n_gaps, 
-                                   color = as.factor(sex_id)), alpha = 0.4) +
+  # --- 3. Bąbelki Posterior Predictive ---
+  geom_count(data = E_fit_sex, 
+             aes(x = day_prior_hatch, y = post_n_gaps, color = as.factor(sex_id)), 
+             alpha = 0.3,
+             position = position_jitter(width = 0.15, height = 0.05)) +
   
-  # Manual Color Scales
+  # --- 4. Przywrócone Adnotacje Płci ---
+  annotate("text", x = 27.8, y = max(plot_gaps_df$m_mu) * 1.4, 
+           label = "\u2642", size = 10, color = col_male, fontface = "bold", family = "sans") +
+  annotate("text", x = 27.8, y = 0.7, 
+           label = "\u2640", size = 10, color = col_female, fontface = "bold", family = "sans") +
+  
+  # --- 5. Skalowanie i Etykiety ---
   scale_color_manual(values = c("1" = col_female, "2" = col_male), guide = "none") +
-  
-  # Sex Labels (Using same multipliers as your neglect plot for consistency)
-  annotate("text", x = 27.8, y = max(plot_gaps_df$m_mu) * 1.25, 
-           label = "\u2642", size = 9, color = col_male, fontface = "bold", family = "sans") +
-  annotate("text", x = 27.8, y = min(plot_gaps_df$f_mu) * 3, 
-           label = "\u2640", size = 9, color = col_female, fontface = "bold", family = "sans") +
-  
-  # Scaling (Linear scale for n_gaps, reversed X for time)
-  scale_x_reverse(breaks = seq(2, 28, by = 5)) +
-  ylim(0, 15) +
+  scale_x_reverse(breaks = seq(0, 30, by = 5)) +
+  scale_y_continuous(
+    # Zoom na istotny zakres (model Poissona rzadko wychodzi poza 4-5)
+    limits = c(-0.3, 2.2), 
+    breaks = seq(0, 5, by = 1),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
   scale_size_continuous(name = "n obs", range = c(1, 7)) +
-  labs(x = "Days prior hatch", y = "Number of neglect gaps") +
+  labs(title = "A)", x = "Days prior hatch", y = "Number of neglect gaps") +
   
-  # --- THE "PRETTY" ADJUSTMENTS (Identical to your neglect plot) ---
-  theme_bw(base_size = 12, base_family = "sans") + 
+  # --- 6. Motyw Graficzny ---
+  theme_bw(base_size = 12, base_family = "sans") +
   theme(
     panel.grid = element_blank(),
-    legend.position = c(0.90, 0.85),
+    legend.position = c(0.90, 0.80),
     legend.background = element_blank(),
-    
-    # Matching fonts and sizes exactly
-    axis.title.x = element_text(size = 13, face = "plain", family = "sans", color = "black"),
-    axis.title.y = element_text(size = 13, face = "plain", family = "sans", color = "black"),
-    axis.text.x = element_text(size = 11, family = "sans", color = "black"),
-    axis.text.y = element_text(size = 11, family = "sans", color = "black"),
-    
-    legend.title = element_text(size = 11, face = "plain", family = "sans"),
-    legend.text = element_text(size = 10, family = "sans"),
+    axis.title = element_text(size = 13, color = "black"),
+    axis.text = element_text(size = 11, color = "black"),
     plot.margin = margin(10, 10, 10, 10)
   )
 ```
@@ -425,7 +541,7 @@ weight on probabilities between 0.1 and 0.9.
 
 
 ```{r prepare-occupancy-data, include=FALSE}
-D_occ <- S %>%
+D_occ <- S_filt %>%
   filter(
     !is.na(sum_neglect_sec),
     !is.na(day_prior_hatch),
@@ -455,11 +571,11 @@ m_occ <- quap(
     b[sex_id] ~ dnorm(0, 0.2)
   ),
   data = d_occ, start = list(a = c(0,0), b = c(0,0))
-)
+)#
 ```
 
 ```{r prior-check-occupancy, fig.width=6, fig.height=4, fig.cap="Prior predictive simulation for probability of neglect model"}
-set.seed(42)
+set.seed(43)
 n_sim    <- 100
 dph_grid <- seq(min(D_occ$dph_c), max(D_occ$dph_c), length.out = 100)
 
@@ -505,6 +621,7 @@ post_occ_samp <- extract.samples(m_occ)
 prob_f    <- inv_logit(post_occ_samp$a[,1])
 prob_m    <- inv_logit(post_occ_samp$a[,2])
 prob_diff <- prob_f - prob_m
+#
 ```
 
 ```{r results-occupancy}
@@ -517,21 +634,12 @@ cat("Male slope:  ", round(mean(post_occ_samp$b[,2]), 4),
 cat("Mean prob diff (F-M):", round(mean(prob_diff), 3),
     " PI:", round(PI(prob_diff), 3), "\n")
 cat("P(Female > Male baseline):", round(mean(post_occ_samp$a[,1] > post_occ_samp$a[,2]), 3), "\n")
+#
 ```
 
-The probability of neglect occurring on any given day decreased as
-hatching approached for both sexes, with both slopes positive on the
-reversed time axis (female: 0.055, 89% PI [0.026, 0.084], P(slope < 0)
-= 0.001; male: 0.069, 89% PI [0.034, 0.105], P(slope < 0) = 0.001).
-This indicates that neglect was more common earlier in incubation and
-became less likely as the egg approached hatching, consistent with
-increasing parental attentiveness near the end of incubation.
+The probability of neglect occurring on any given day showed the same pattern. With the reversed time scale, the positive slopes (female: 0.061; male: 0.067) indicate that the probability of neglect declines toward hatching (female PI [0.026, 0.096], P(slope < 0) = 0.002; male PI [0.036, 0.099], P(slope < 0) = 0). Thus, neglect was more common earlier in incubation and became less likely as hatching approached.
 
-Males were consistently more likely to neglect than females throughout
-incubation, with a baseline probability difference of −0.183 (89% PI
-[−0.252, −0.115]; P(Female > Male) = 0), confirming that the male-biased
-pattern seen in gap frequency also holds when simply asking whether any
-neglect occurred at all on a given day.
+Males were credibly more likely to neglect than females, with a baseline difference of −0.074 (89% PI [−0.137, −0.012]; P(Female > Male) = 0.029). Although smaller than in the unfiltered data, this still supports a male-biased tendency to neglect at the daily level.
 
 ```{r plot-occupancy, fig.width=7, fig.height=5, fig.cap="Probability of any neglect per day by sex across incubation"}
 plot_occ <- data.frame(
@@ -540,15 +648,21 @@ plot_occ <- data.frame(
   m_mu = mu_m_occ, m_low = PI_m_occ[1,], m_high = PI_m_occ[2,]
 )
 
+post_samples_occ <- sim(m_occ, data = d_occ)#
+
+
+D_occ$post_any_neglect <- post_samples_occ[1, ]
+
 ggplot() +
+
   geom_ribbon(data = plot_occ,
               aes(x = day, ymin = f_low, ymax = f_high),
               fill = col_female, alpha = 0.15) +
   geom_ribbon(data = plot_occ,
               aes(x = day, ymin = m_low, ymax = m_high),
               fill = col_male, alpha = 0.15) +
-  labs(title = "C)") +
   
+  # Mean Lines
   geom_line(data = plot_occ,
             aes(x = day, y = f_mu),
             color = col_female, linewidth = 1.2) +
@@ -556,27 +670,36 @@ ggplot() +
             aes(x = day, y = m_mu),
             color = col_male, linewidth = 1.2) +
   
+  # Bubble Points - TERAZ Z POSTERIOR PREDICTIVE (0 lub 1)
   geom_count(data = D_occ,
              aes(x = day_prior_hatch,
-                 y = any_neglect,
+                 y = post_any_neglect, # Zmienione na dane symulowane
                  color = as.factor(sex_id)),
-             alpha = 0.4) +
+             alpha = 0.3,
+             # Dodajemy jitter, żeby bąbelki na 0 i 1 nie były "płaskimi" plackami
+             position = position_jitter(width = 0.15, height = 0.03)) +
   
+  # Manual Color Scales
   scale_color_manual(values = c("1" = col_female, "2" = col_male),
                      guide = "none") +
   
-  annotate("text", x = 28.8, y = 0.88,
-           label = "\u2642", size = 9,
+  # Sex Labels
+  annotate("text", x = 27.8, y = 0.7,
+           label = "\u2642", size = 10,
            color = col_male, fontface = "bold") +
-  annotate("text", x = 28.8, y = 0.75,
-           label = "\u2640", size = 9,
+  annotate("text", x = 27.8, y = 0.20,
+           label = "\u2640", size = 10,
            color = col_female, fontface = "bold") +
   
-  scale_x_reverse(breaks = seq(2, 28, by = 5)) +
-  ylim(0, 1) +
+  # Scaling and Labels
+  scale_x_reverse(breaks = seq(0, 30, by = 5)) +
+  # Dodajemy mały margines w coord_cartesian, żeby jitter nie "uciekał" poza oś
+  coord_cartesian(ylim = c(-0.1, 1.1)) +
+  scale_y_continuous(breaks = c(0, 0.5, 1)) +
   scale_size_continuous(name = "n obs", range = c(1, 6)) +
-  labs(x = "Days prior hatch", y = "Probability of neglect") +
+  labs(title = "C)", x = "Days prior hatch", y = "Probability of neglect") +
   
+  # Theme
   theme_bw(base_size = 12, base_family = "sans") +
   theme(
     panel.grid = element_blank(),
@@ -615,7 +738,7 @@ to a baseline duration of roughly 400 seconds (~7 minutes), which is
 biologically plausible for a seabird of this size.
 
 ```{r prepare-duration-data, include=FALSE}
-D_dur <- S %>%
+D_dur <- S_filt %>%
   filter(
     !is.na(sum_neglect_sec),
     sum_neglect_sec > 0,
@@ -712,14 +835,18 @@ cat("P(Female > Male baseline):", round(mean(post_dur_samp$a[,1] > post_dur_samp
 ```
 
 
-When neglect did occur, its duration also decreased toward hatching at a near-identical rate in both sexes (female slope: 0.0633, 89% PI [0.0344, 0.0934], P(slope < 0) = 0; male slope: 0.0638, 89% PI [0.0368, 0.0915], P(slope < 0) = 0), suggesting that not only does neglect become less frequent near hatching, but individual neglect episodes also become shorter.
+When neglect did occur, its duration also changed over time. Again, given the reversed scale, the positive slopes (female: 0.0633; male: 0.0638) indicate that neglect duration decreases toward hatching (female PI [0.0344, 0.0934]; male PI [0.0368, 0.0915]; both P(slope < 0) = 0). This shows that not only does neglect become less frequent, but individual events also become shorter as hatching approaches.
 
-Unlike gap frequency and probability of neglect, the duration of neglect when it occurred did not differ credibly between sexes. The mean baseline difference was -38 seconds (89% PI [-140.1, 62.7]; P(Female > Male) = 0.275), with the interval spanning zero and the posterior showing substantial overlap. This suggests that while males neglect more often, when either sex does neglect, the duration of those episodes is broadly similar.
+There was no credible sex difference in duration. The mean baseline difference was −38 seconds (89% PI [−140.1, 62.7]; P(Female > Male) = 0.275), indicating substantial overlap between sexes.
 
-Taken together, the hurdle model reveals an important asymmetry: the sex difference in neglect is primarily driven by how often males initiate gaps and whether they neglect at all, rather than by differences in how long neglect lasts once it begins. Both components decline toward hatching, pointing to a shared increase in parental commitment as the critical hatching window approaches.
+Taken together, the hurdle model reveals an important asymmetry: the sex difference in neglect is primarily driven by whether they neglect at all, rather than by differences in how long neglect lasts once it begins. Both components decline toward hatching, pointing to a shared increase in parental commitment as the critical hatching window approaches.
 
 
 ```{r plot-duration, fig.width=7, fig.height=5, fig.cap="Total neglect duration (seconds, log scale) given neglect occurred, by sex across incubation"}
+post_samples_log_dur <- sim(m_dur, data = d_dur)
+
+
+D_dur$post_sum_neglect_sec <- exp(post_samples_log_dur[1, ])
 
 plot_df <- data.frame(
   day = DAY_SEQ,
@@ -728,7 +855,6 @@ plot_df <- data.frame(
 )
 
 ggplot() +
-  # 1. Uncertainty Ribbons
   geom_ribbon(data = plot_df,
               aes(x = day, ymin = f_low, ymax = f_high),
               fill = col_female, alpha = 0.15) +
@@ -744,57 +870,45 @@ ggplot() +
             aes(x = day, y = m_mu),
             color = col_male, linewidth = 1.2) +
   
-  # 3. Observation Bubbles 
-  # Using round() ensures that close values overlap to create "n obs" > 1
-  geom_point(data = D_dur,
+  # 3. Bubble Points - TERAZ Z POSTERIOR PREDICTIVE
+  # geom_count automatycznie pogrupuje podobne wartości symulowane
+  geom_count(data = D_dur,
              aes(x = day_prior_hatch,
-                 y = sum_neglect_sec,
+                 y = post_sum_neglect_sec, 
                  color = as.factor(sex_id)),
-             alpha = 0.4, 
-             size = 2) + #
+             alpha = 0.3) + 
   
-  # 4. Sex Annotations (Placed at the start of the lines)
-  annotate("text", x = 27.8, y = plot_df$m_mu[100] * 3, 
+  # 4. Sex Annotations
+  annotate("text", x = 27.8, y = plot_df$m_mu[100] * 2.4, 
            label = "\u2642", size = 10, color = col_male, fontface = "bold", family = "sans") +
-  annotate("text", x = 27.8, y = plot_df$f_mu[100] * 0.3, 
+  annotate("text", x = 27.8, y = plot_df$f_mu[100] * 0.4, 
            label = "\u2640", size = 10, color = col_female, fontface = "bold", family = "sans") +
+
+# 5. Scales and Labels
+scale_color_manual(values = c("1" = col_female, "2" = col_male), guide = "none") +
   
-  # 5. Scales and Labels
-  scale_color_manual(values = c("1" = col_female, "2" = col_male), guide = "none") +
-  scale_y_log10(labels = scales::label_number(),
-                breaks = scales::trans_breaks("log10", function(x) 10^x)) +
-  scale_x_reverse(breaks = seq(2, 28, by = 5)) +
+  scale_size_continuous(range = c(0.5, 2), guide = "none") + 
   
-  # 6. Size Legend (Fixed to whole numbers 1 and 2 only)
-  scale_size_continuous(name = "n obs", 
-                        range = c(1.5, 4), 
-                        breaks = c(1, 2),
-                        labels = c("1", "2")) +
-  
+  scale_y_log10(
+    breaks = c(100, 1000, 10000, 100000), 
+    labels = scales::label_comma(),
+    expand = expansion(mult = c(0.1, 0.1))
+  ) +
+  scale_x_reverse(breaks = seq(0, 30, by = 5)) +
   labs(title = "B)", 
        x = "Days prior hatch",
-       y = "Duration of neglect (sec, log scale)") +
+       y = "Duration of neglect events (sec, log scale)") +
   
-  # 7. Theme and Font Adjustments
+  # 7. Theme
   theme_bw(base_size = 12, base_family = "sans") +
   theme(
     panel.grid = element_blank(),
-    legend.position = c(0.90, 0.85),      # Nudged down slightly to avoid border
-    legend.background = element_blank(), 
-    legend.key = element_blank(),        # Transparent legend keys
-    
-    # Matching all text to Arial/Sans
-    axis.title.x = element_text(size = 13, family = "sans"),
-    axis.title.y = element_text(size = 13, family = "sans"),
-    axis.text.x = element_text(size = 11, color = "black", family = "sans"),
-    axis.text.y = element_text(size = 11, color = "black", family = "sans"),
-    
-    legend.title = element_text(size = 11, family = "sans"),
-    legend.text = element_text(size = 10, family = "sans"),
+    legend.position = "none", # Najpewniejszy sposób na usunięcie wszystkich legend
+    axis.title = element_text(size = 13),
+    axis.text = element_text(size = 11, color = "black"),
     plot.margin = margin(10, 10, 10, 10)
   )
 
-# View plot
 ```
 
 
@@ -818,34 +932,70 @@ were included in this analysis.
 
 $$\begin{aligned}
 N_i &\sim \text{Poisson}(\lambda_i) \\
-\log(\lambda_i) &= \alpha_{session[i]} + \beta \cdot \text{pair}_{01} \\
+\log(\lambda_i) &= \alpha_{pair[i]} + \beta_1 \cdot dph\_c_i \\
 \alpha_j &\sim \text{Normal}(0,\, 0.8) \\
-\beta &\sim \text{Normal}(0,\, 0.5)
+\beta_1 &\sim \text{Normal}(0,\, 0.5)
 \end{aligned}$$
 
 $$\begin{aligned}
 \log(D_i) &\sim \text{Normal}(\mu_i,\, \sigma) \\
-\mu_i &= \alpha_{session[i]} + \beta \cdot \text{pair}_{01} \\
+\mu_i &= \alpha_{pair[i]} + \beta_1 \cdot dph\_c_i \\
 \alpha_j &\sim \text{Normal}(6,\, 0.5) \\
-\beta &\sim \text{Normal}(0,\, 0.5) \\
+\beta_1 &\sim \text{Normal}(0,\, 0.5) \\
 \sigma &\sim \text{Exponential}(1)
 \end{aligned}$$
-
 Where $\text{pair}_{01}$ is a binary indicator (0 = New, 1 = Old) and
 session $j$ captures variation across incubation stages.
 
 ```{r prepare-pairstatus-data, include=FALSE}
 E <- readRDS("./EDA_egg_neglect_index_neglect_table.RDS")
+Y <- readRDS("./EDA_egg_neglect_index_gaps_table.RDS")
+
+# --- Filter short gaps and rebuild E summaries ---
+Y_filtered <- bind_rows(Y) %>%          # flatten list to single dataframe
+  filter(dur >= 300)                     # keep only gaps >= 5 min
+
+Y_summary <- Y_filtered %>%
+  group_by(season, session, nest) %>%
+  summarise(
+    n_gaps    = n(),
+    sum_gaps  = sum(dur),
+    mean_gaps = mean(dur),
+    .groups   = "drop"
+  )
+
+E <- E %>%
+  select(-n_gaps, -sum_gaps, -mean_gaps) %>%
+  left_join(Y_summary, by = c("season", "session", "nest")) %>%
+  mutate(
+    n_gaps    = replace_na(n_gaps,    0),
+    sum_gaps  = replace_na(sum_gaps,  0),
+    mean_gaps = replace_na(mean_gaps, 0)
+  )
+
+nest_summary <- E %>%
+  group_by(season, Pair_status) %>%
+  summarise(n_distinct_nests = n_distinct(nest), .groups = 'drop')
 
 E <- E %>%
   mutate(
-    session_id  = as.integer(factor(session, levels = c("incubation1", "incubation2", "incubation3"))),
-    pair_01     = ifelse(Pair_status == "Old", 1, 0),
+    pair_01     = ifelse(Pair_status == "Old", 2, 1),
     has_neglect = ifelse(sum_gaps > 0, 1, 0)
   )
 
+E <- E %>%
+  mutate(
+    session = case_when(
+      day_prior_hatch >= 21 & day_prior_hatch <= 30 ~ "early",
+      day_prior_hatch >= 11 & day_prior_hatch <= 20 ~ "mid",
+      day_prior_hatch >= 0  & day_prior_hatch <= 10 ~ "late",
+      TRUE ~ NA_character_),
+    dph_c = day_prior_hatch - mean(day_prior_hatch)
+  )
+
+# Filter global datasets
 D_all     <- E %>% filter(!is.na(Pair_status), !is.na(n_gaps), !is.na(session))
-D_nonzero <- D_all %>% filter(sum_gaps > 0) %>% mutate(y = log(sum_gaps))
+D_nonzero <- D_all %>% filter(sum_gaps > 0)
 ```
 
 ```{r prior-check-pairstatus, fig.width=6, fig.height=4, fig.cap="Prior predictive simulation for pair status models"}
@@ -883,96 +1033,115 @@ par(mfrow = c(1, 1))
 m_status_freq <- quap(
   alist(
     n_gaps ~ dpois(lambda),
-    log(lambda) <- a[session_id] + b * pair_01,
-    a[session_id] ~ dnorm(0, 0.8),
+    log(lambda) <- a[pair_01] + b* dph_c,
+    a[pair_01] ~ dnorm(0, 0.8),
     b ~ dnorm(0, 0.5)
   ), data = D_all
 )
 
 m_status_dur <- quap(
   alist(
-    y ~ dnorm(mu, sigma),
-    mu <- a[session_id] + b * pair_01,
-    a[session_id] ~ dnorm(6, 0.5),
+    sum_gaps ~ dnorm(mu, sigma),
+    mu <- a[pair_01] + b* dph_c,
+    a[pair_01] ~ dnorm(6, 0.5),
     b ~ dnorm(0, 0.5),
     sigma ~ dexp(1)
   ), data = D_nonzero
 )
+
+post_f <- extract.samples(m_status_freq)
+post_d <- extract.samples(m_status_dur)
 ```
 
 ```{r posterior-pairstatus, include=FALSE}
-post_f <- extract.samples(m_status_freq)
-post_d <- extract.samples(m_status_dur)
-
 plot_freq_df <- data.frame(
   status = factor(c("New", "Old"), levels = c("New", "Old")),
-  mu   = c(mean(exp(post_f$a[,1])), mean(exp(post_f$a[,1] + post_f$b))),
-  low  = c(PI(exp(post_f$a[,1]))[1], PI(exp(post_f$a[,1] + post_f$b))[1]),
-  high = c(PI(exp(post_f$a[,1]))[2], PI(exp(post_f$a[,1] + post_f$b))[2])
+  mu   = c(mean(exp(post_f$a)), mean(exp(post_f$a + post_f$b))),
+  low  = c(PI(exp(post_f$a))[1], PI(exp(post_f$a + post_f$b))[1]),
+  high = c(PI(exp(post_f$a))[2], PI(exp(post_f$a + post_f$b))[2])
 )
 
 plot_dur_df <- data.frame(
   status = factor(c("New", "Old"), levels = c("New", "Old")),
-  mu   = c(mean(exp(post_d$a[,1])), mean(exp(post_d$a[,1] + post_d$b))),
-  low  = c(PI(exp(post_d$a[,1]))[1], PI(exp(post_d$a[,1] + post_d$b))[1]),
-  high = c(PI(exp(post_d$a[,1]))[2], PI(exp(post_d$a[,1] + post_d$b))[2])
+  mu   = c(mean(exp(post_d$a)), mean(exp(post_d$a + post_d$b))),
+  low  = c(PI(exp(post_d$a))[1], PI(exp(post_d$a + post_d$b))[1]),
+  high = c(PI(exp(post_d$a))[2], PI(exp(post_d$a + post_d$b))[2])
+)
+
+
+# plot posteriors
+f_sim <- sim(m_status_freq, data = list(pair_01 = 1:2, dph_c = c(0,0)), n = 2000)
+d_sim <- sim(m_status_dur,  data = list(pair_01 = 1:2, dph_c = c(0,0)), n = 2000)
+
+df_post_f <- data.frame(
+  Pair_status = rep(c("New", "Old"), each = 2000),
+  val = as.vector(f_sim)
+)
+
+df_post_d <- data.frame(
+  Pair_status = rep(c("New", "Old"), each = 2000),
+  val = as.vector(d_sim)
 )
 ```
 
 ```{r results-pairstatus}
-cat("FREQ: Rate ratio (Old/New):", round(mean(exp(post_f$b)), 3),
-    " 89% PI:", round(PI(exp(post_f$b)), 3), "\n")
-cat("FREQ: P(Old > New):", round(mean(post_f$b > 0), 3), "\n")
+post_f <- extract.samples(m_status_freq)
+post_d <- extract.samples(m_status_dur)
 
-dur_new  <- exp(post_d$a[,1])
-dur_old  <- exp(post_d$a[,1] + post_d$b)
-dur_diff <- dur_old - dur_new
-cat("DUR: Mean diff (Old-New, sec):", round(mean(dur_diff), 1),
-    " 89% PI:", round(PI(dur_diff), 1), "\n")
-cat("DUR: P(Old > New):", round(mean(post_d$b > 0), 3), "\n")
+cat("\n--- PAIR STATUS RESULTS (Global Intercept) ---\n")
+cat("FREQ: Rate ratio (Old/New):", round(mean(exp(post_f$b)), 3), " | 89% PI:", round(PI(exp(post_f$b)), 3), "\n")
+cat("DUR:  Duration Ratio (Old/New):", round(mean(exp(post_d$b)), 3), " | 89% PI:", round(PI(exp(post_d$b)), 3), "\n")
+cat("DUR:  P(Old Duration > New Duration):", round(mean(post_d$b > 0), 3), "\n")
+
 ```
 
-Established pairs (Old) initiated gaps more frequently than new pairs,
-with a rate ratio of 1.25 (89% PI [1.01, 1.53]; P(Old > New) = 0.953),
-suggesting that experienced pairs leave the nest more often. However,
-when neglect did occur, the duration of neglect episodes did not differ
-credibly between pair types — the mean difference was 125.5 seconds in
-favour of Old pairs (89% PI [−273.5, 493.0]; P(Old > New) = 0.719), with
-the interval spanning zero and substantial posterior uncertainty. This
-suggests that while established pairs neglect more frequently, the length
-of individual neglect episodes is similar regardless of pair experience.
+Pair experience significantly influenced the frequency of nest neglect, though its effect on the duration of neglect was less clear. Established pairs (Old) initiated neglect events more frequently than new pairs, with a rate ratio of 1.21 (89% PI [1.16, 1.25]). These results provide strong evidence that experienced pairs leave the nest more often than new pairs throughout the incubation period.
+
+However, once neglect occurred, there was no credible evidence that established pairs stayed off the nest for longer durations than new pairs. Although the mean duration ratio was 1.15 in favor of Old pairs, the credible interval was very wide (89% PI [0.45, 2.23]) and the posterior probability that Old pairs had longer durations was only 0.514. This indicates that while experienced pairs neglect the nest more often, the length of those individual neglect episodes does not differ significantly based on pair status.
 
 ```{r plot-pairstatus, fig.width=8, fig.height=5, fig.cap="Gap frequency (A) and neglect duration (B) by pair status. Points show model estimates with 89% PI; violins and jittered points show raw data."}
+df_post_d_clean <- df_post_d
+df_post_d_clean$val[df_post_d_clean$val <= 0] <- 1 # Zamiana na 1s, by log10 działał
+
+# --- Wykres A: Bez zmian (Poisson nie ma problemu z log) ---
 p_freq <- ggplot() +
-  geom_violin(data = D_all, aes(x = Pair_status, y = n_gaps),
-              fill = "gray90", color = "gray80", alpha = 0.5) +
-  geom_jitter(data = D_all, aes(x = Pair_status, y = n_gaps),
-              width = 0.2, alpha = 0.3, color = "gray40", size = 1) +
-  geom_errorbar(data = plot_freq_df, aes(x = status, ymin = low, ymax = high),
-                width = 0.1, linewidth = 1.2, color = "black") +
-  geom_point(data = plot_freq_df, aes(x = status, y = mu),
-             size = 4, color = "black") +
-  labs(title = "A)", x = "Pair status", y = "Number of exits") +
-  theme_bw(base_size = 12, base_family = "sans") +
-  theme(panel.grid = element_blank())
+  geom_jitter(data = D_all, aes(x = factor(pair_01, labels=c("New", "Old")), y = n_gaps),
+              width = 0.2, alpha = 0.2, size = 1, color = "gray70") +
+  geom_violin(data = df_post_f, aes(x = Pair_status, y = val), 
+              fill = "gray95", color = "black", linewidth = 0.5, alpha = 0.5) +
+  geom_errorbar(data = plot_freq_df, aes(x = status, ymin = low, ymax = high), 
+                width = 0.05, linewidth = 1, color = "black") +
+  geom_point(data = plot_freq_df, aes(x = status, y = mu), 
+             size = 3.5, color = "black") +
+  coord_cartesian(ylim = c(0, 5)) +
+  labs(title = "A) Gap Frequency", x = "Pair Status", y = "Number of gaps") +
+  theme_classic(base_size = 12)
 
+# --- Wykres B: Poprawiony pod skalę logarytmiczną ---
 p_dur <- ggplot() +
-  geom_violin(data = D_nonzero, aes(x = Pair_status, y = sum_gaps),
-              fill = "gray90", color = "gray80", alpha = 0.5) +
-  geom_jitter(data = D_nonzero, aes(x = Pair_status, y = sum_gaps),
-              width = 0.2, alpha = 0.3, color = "gray40", size = 1) +
-  geom_errorbar(data = plot_dur_df, aes(x = status, ymin = low, ymax = high),
-                width = 0.1, linewidth = 1.2, color = "black") +
-  geom_point(data = plot_dur_df, aes(x = status, y = mu),
-             size = 4, color = "black") +
-  scale_y_log10(labels = scales::label_number()) +
-  labs(title = "B)", x = "Pair status", y = "Duration of neglect (sec, log scale)") +
-  theme_bw(base_size = 12, base_family = "sans") +
-  theme(panel.grid = element_blank())
+  geom_jitter(data = D_nonzero, aes(x = factor(pair_01, labels=c("New", "Old")), y = sum_gaps),
+              width = 0.2, alpha = 0.2, size = 1, color = "gray70") +
+  # Używamy wyczyszczonych danych (df_post_d_clean)
+  geom_violin(data = df_post_d_clean, aes(x = Pair_status, y = val), 
+              fill = "gray95", color = "black", linewidth = 0.5, alpha = 0.5) +
+  geom_errorbar(data = plot_dur_df, aes(x = status, ymin = low, ymax = high), 
+                width = 0.05, linewidth = 1, color = "black") +
+  geom_point(data = plot_dur_df, aes(x = status, y = mu), 
+             size = 3.5, color = "black") +
+  # Ustawienie limitów wewnątrz skali, by uniknąć wyrzucania punktów przez jitter
+  scale_y_log10(labels = scales::label_comma(), 
+                breaks = c(1, 100, 1000, 10000, 100000)) +
+  labs(title = "B) Neglect Duration", x = "Pair Status", y = "Duration (sec)") +
+  theme_classic(base_size = 12)
 
+
+# Połączenie wykresów
 library(patchwork)
 p_freq + p_dur
+
 ```
+
+Differences in nest neglect frequency and duration between new and established pairs. A) Number of gaps initiated per observation session. B) Total duration of neglect episodes (seconds, plotted on log scale) for sessions where neglect occurred. In both panels, large red points represent posterior means, and black error bars represent 89% posterior credible intervals derived from Bayesian GLMs (Poisson for frequency, log-Normal for duration). The shaded violin plots illustrate the full posterior distribution of the expected values. Small gray jittered points show the raw observed data for each pair status. While established pairs (Old) initiated neglect gaps significantly more frequently than new pairs, the duration of individual neglect episodes did not differ credibly between pair types.
 
 ---
 
@@ -999,7 +1168,7 @@ $$\begin{aligned}
 \end{aligned}$$
 
 ```{r prepare-similarity-data, include=FALSE}
-D_sim         <- D_all %>% filter(!is.na(Similarity_Index), session == "incubation1")
+D_sim         <- D_all %>% filter(!is.na(Similarity_Index), session == "early")
 D_sim_nonzero <- D_sim %>% filter(sum_gaps > 0) %>% mutate(y = log(sum_gaps))
 ```
 
@@ -1158,7 +1327,7 @@ significance testing.
 
 $$\begin{aligned}
 \text{is_neglecting}_i &\sim \text{Binomial}(1,\, p_i) \\
-\text{logit}(p_i) &= \beta \cdot \text{session}_i + u_{ringno[i]} \\
+\text{logit}(p_i) &= \beta \cdot \text{dph}_c,i + u_{ringno[i]} \\
 u_{ringno} &\sim \text{Normal}(0,\, \sigma^2_{ringno})
 \end{aligned}$$
 
@@ -1175,7 +1344,14 @@ females and males.
 library(rptR)
 
 S <- readRDS("EDA_sex_neglect_wide.RDS")
-S$is_neglecting <- ifelse(S$sum_neglect_sec > 0, 1, 0)
+S <- S %>%
+  filter(!is.na(day_prior_hatch),
+         day_prior_hatch >= 2,
+         day_prior_hatch <= 28) %>%
+  mutate(
+    dph_c = day_prior_hatch - mean(day_prior_hatch, na.rm = TRUE),
+    is_neglecting = ifelse(sum_neglect_sec > 0, 1, 0)
+  )
 
 S_male   <- S %>% filter(sx == "m")
 S_female <- S %>% filter(sx == "f")
@@ -1183,7 +1359,7 @@ S_female <- S %>% filter(sx == "f")
 
 ```{r fit-repeatability-overall, include=FALSE, cache=TRUE, message = FALSE}
 rep_binary <- rpt(
-  is_neglecting ~ session + (1 | ringno),
+  is_neglecting ~ dph_c + (1 | ringno),
   grname   = "ringno",
   data     = S,
   datatype = "Binary",
@@ -1194,7 +1370,7 @@ rep_binary <- rpt(
 
 ```{r fit-repeatability-sex, include=FALSE, cache=TRUE, message = FALSE}
 rep_binary_male <- rpt(
-  is_neglecting ~ session + (1 | ringno),
+  is_neglecting ~ dph_c + (1 | ringno),
   grname   = "ringno",
   data     = S_male,
   datatype = "Binary",
@@ -1203,7 +1379,7 @@ rep_binary_male <- rpt(
 )
 
 rep_binary_female <- rpt(
-  is_neglecting ~ session + (1 | ringno),
+  is_neglecting ~ dph_c + (1 | ringno),
   grname   = "ringno",
   data     = S_female,
   datatype = "Binary",
@@ -1244,31 +1420,11 @@ kable(summary_table,
 ```
 
 
-Neglect tendency showed significant and consistent repeatability across
-incubation sessions. In the overall sample, individuals were moderately
-repeatable in whether they neglected at all, with a link-scale
-repeatability of R = 0.287 (95% CI [0.142, 0.417]; P < 0.001 by
-permutation test), and an original-scale estimate of R = 0.348 (95% CI
-[0.153, 0.607]). This indicates that a meaningful proportion of variation
-in neglect occurrence is attributable to stable among-individual
-differences, rather than being purely driven by session or chance.
+Neglect tendency showed significant and consistent repeatability across incubation sessions. In the overall sample, individuals were moderately repeatable in whether they neglected at all, with a link-scale repeatability of R = 0.247 (95% CI [0.116, 0.369]; P = 0.001 by permutation test), and an original-scale estimate of R = 0.250 (95% CI [0.118, 0.408]). This indicates that a meaningful proportion of variation in neglect occurrence is attributable to stable among-individual differences, rather than being purely driven by session or chance.
 
-Repeatability was significant in both sexes, with females showing
-somewhat higher individual consistency than males. Females had a
-link-scale repeatability of R = 0.290 (95% CI [0.091, 0.440]), compared
-to R = 0.198 (95% CI [0.043, 0.374]) in males, with both significant at
-P < 0.001 by permutation test. The confidence intervals of both sexes
-overlap substantially, so caution is warranted in interpreting this
-difference as biologically meaningful.
+Repeatability was significant in both sexes, though point estimates suggest that females may show higher individual consistency than males. Females had a link-scale repeatability of R = 0.262 (95% CI [0.063, 0.408]), compared to R = 0.141 (95% CI [0.005, 0.301]) in males, with both significant at P < 0.005 by permutation test. The confidence intervals of both sexes overlap substantially, so caution is warranted in interpreting this difference as biologically meaningful.
 
-Taken together, these results suggest that neglect tendency is a
-repeatable individual trait in this population — some individuals
-consistently neglect across incubation sessions while others consistently
-do not. This repeatability is present in both sexes, and its consistency
-with the earlier finding that males initiate gaps more frequently
-suggests that individual differences in neglect propensity may reflect
-stable behavioural strategies rather than purely opportunistic responses
-to environmental conditions.
+Taken together, these results suggest that neglect tendency is a repeatable individual trait in this population — some individuals consistently neglect across incubation sessions while others consistently do not. 
 
 # Effect of neglect on incubation duration
 

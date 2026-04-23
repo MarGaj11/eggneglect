@@ -4,17 +4,55 @@ rm(list = ls())
 library(rethinking)
 library(dplyr)
 library(ggplot2)
+library(tidyr)
 
 
 # =========================================================
 # 1. DATA PREPARATION & GLOBAL SETTINGS
 # =========================================================
 E <- readRDS("./EDA_egg_neglect_index_neglect_table.RDS")
+Y <- readRDS("./EDA_egg_neglect_index_gaps_table.RDS")
+
+# --- Filter short gaps and rebuild E summaries ---
+Y_filtered <- bind_rows(Y) %>%          # flatten list to single dataframe
+  filter(dur >= 300)                     # keep only gaps >= 5 min
+
+Y_summary <- Y_filtered %>%
+  group_by(season, session, nest) %>%
+  summarise(
+    n_gaps    = n(),
+    sum_gaps  = sum(dur),
+    mean_gaps = mean(dur),
+    .groups   = "drop"
+  )
+
+E <- E %>%
+  select(-n_gaps, -sum_gaps, -mean_gaps) %>%
+  left_join(Y_summary, by = c("season", "session", "nest")) %>%
+  mutate(
+    n_gaps    = replace_na(n_gaps,    0),
+    sum_gaps  = replace_na(sum_gaps,  0),
+    mean_gaps = replace_na(mean_gaps, 0)
+  )
+
+nest_summary <- E %>%
+  group_by(season, Pair_status) %>%
+  summarise(n_distinct_nests = n_distinct(nest), .groups = 'drop')
 
 E <- E %>%
   mutate(
-    pair_01     = ifelse(Pair_status == "Old", 1, 0),
+    pair_01     = ifelse(Pair_status == "Old", 2, 1),
     has_neglect = ifelse(sum_gaps > 0, 1, 0)
+  )
+
+E <- E %>%
+  mutate(
+    session = case_when(
+      day_prior_hatch >= 21 & day_prior_hatch <= 30 ~ "early",
+      day_prior_hatch >= 11 & day_prior_hatch <= 20 ~ "mid",
+      day_prior_hatch >= 0  & day_prior_hatch <= 10 ~ "late",
+      TRUE ~ NA_character_),
+    dph_c = day_prior_hatch - mean(day_prior_hatch)
   )
 
 # Filter global datasets
@@ -26,25 +64,22 @@ D_nonzero <- D_all %>% filter(sum_gaps > 0)
 # 2. PAIR STATUS ANALYSIS (Aggregated Sessions)
 # =========================================================
 
-# --- 2.1 Models (session_id removed) ---
-# Frequency Model (Poisson)
 m_status_freq <- quap(
   alist(
     n_gaps ~ dpois(lambda),
-    log(lambda) <- a + b * pair_01,
-    a ~ dnorm(0, 0.8),
+    log(lambda) <- a[pair_01] + b* dph_c,
+    a[pair_01] ~ dnorm(0, 0.8),
     b ~ dnorm(0, 0.5)
   ), data = D_all
 )
 
-# Duration Model (Gamma Hurdle)
 m_status_dur <- quap(
   alist(
-    sum_gaps ~ dgamma2(mu, scale), 
-    log(mu) <- a + b * pair_01,
-    a ~ dnorm(7, 1.5), 
-    b ~ dnorm(0, 1),
-    scale ~ dexp(1)
+    sum_gaps ~ dnorm(mu, sigma),
+    mu <- a[pair_01] + b* dph_c,
+    a[pair_01] ~ dnorm(6, 0.5),
+    b ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
   ), data = D_nonzero
 )
 
@@ -63,56 +98,73 @@ cat("DUR:  P(Old Duration > New Duration):", round(mean(post_d$b > 0), 3), "\n")
 # Prepare Frequency Model Estimate Dataframe
 plot_freq_df <- data.frame(
   status = factor(c("New", "Old"), levels = c("New", "Old")),
-  mu = c(mean(exp(post_f$a)), mean(exp(post_f$a + post_f$b))),
-  low = c(PI(exp(post_f$a))[1], PI(exp(post_f$a + post_f$b))[1]),
+  mu   = c(mean(exp(post_f$a)), mean(exp(post_f$a + post_f$b))),
+  low  = c(PI(exp(post_f$a))[1], PI(exp(post_f$a + post_f$b))[1]),
   high = c(PI(exp(post_f$a))[2], PI(exp(post_f$a + post_f$b))[2])
 )
 
-# Prepare Duration Model Estimate Dataframe
 plot_dur_df <- data.frame(
   status = factor(c("New", "Old"), levels = c("New", "Old")),
-  mu = c(mean(exp(post_d$a)), mean(exp(post_d$a + post_d$b))),
-  low = c(PI(exp(post_d$a))[1], PI(exp(post_d$a + post_d$b))[1]),
+  mu   = c(mean(exp(post_d$a)), mean(exp(post_d$a + post_d$b))),
+  low  = c(PI(exp(post_d$a))[1], PI(exp(post_d$a + post_d$b))[1]),
   high = c(PI(exp(post_d$a))[2], PI(exp(post_d$a + post_d$b))[2])
 )
 
-# --- 2.4 Plotting ---
 
-library(ggplot2)
-library(patchwork)
+# plot posteriors
+f_sim <- sim(m_status_freq, data = list(pair_01 = 1:2, dph_c = c(0,0)), n = 2000)
+d_sim <- sim(m_status_dur,  data = list(pair_01 = 1:2, dph_c = c(0,0)), n = 2000)
 
-# Plot A: Frequency
+df_post_f <- data.frame(
+  Pair_status = rep(c("New", "Old"), each = 2000),
+  val = as.vector(f_sim)
+)
+
+df_post_d <- data.frame(
+  Pair_status = rep(c("New", "Old"), each = 2000),
+  val = as.vector(d_sim)
+)
+
+
+df_post_d_clean <- df_post_d
+df_post_d_clean$val[df_post_d_clean$val <= 0] <- 1 # Zamiana na 1s, by log10 działał
+
+# --- Wykres A: Bez zmian (Poisson nie ma problemu z log) ---
 p_freq <- ggplot() +
-  geom_violin(data = D_all, aes(x = Pair_status, y = n_gaps), 
-              fill = "gray90", color = "gray80", alpha = 0.5) +
-  geom_jitter(data = D_all, aes(x = Pair_status, y = n_gaps),
-              width = 0.2, alpha = 0.3, color = "gray40", size = 1) +
+  geom_jitter(data = D_all, aes(x = factor(pair_01, labels=c("New", "Old")), y = n_gaps),
+              width = 0.2, alpha = 0.2, size = 1, color = "gray70") +
+  geom_violin(data = df_post_f, aes(x = Pair_status, y = val), 
+              fill = "gray95", color = "black", linewidth = 0.5, alpha = 0.5) +
   geom_errorbar(data = plot_freq_df, aes(x = status, ymin = low, ymax = high), 
-                width = 0.1, linewidth = 1.2, color = "black") +
+                width = 0.05, linewidth = 1, color = "black") +
   geom_point(data = plot_freq_df, aes(x = status, y = mu), 
-             size = 4, color = "black") +
-  labs(title = "A)", x = "Pair Status", y = "Number of exits") +
-  theme_bw(base_size = 12, base_family = "sans") +
-  theme(panel.grid = element_blank())
+             size = 3.5, color = "black") +
+  coord_cartesian(ylim = c(0, 5)) +
+  labs(title = "A) Gap Frequency", x = "Pair Status", y = "Number of gaps") +
+  theme_classic(base_size = 12)
 
-# Plot B: Duration
+# --- Wykres B: Poprawiony pod skalę logarytmiczną ---
 p_dur <- ggplot() +
-  geom_violin(data = D_nonzero, aes(x = Pair_status, y = sum_gaps), 
-              fill = "gray90", color = "gray80", alpha = 0.5) +
-  geom_jitter(data = D_nonzero, aes(x = Pair_status, y = sum_gaps),
-              width = 0.2, alpha = 0.3, color = "gray40", size = 1) +
+  geom_jitter(data = D_nonzero, aes(x = factor(pair_01, labels=c("New", "Old")), y = sum_gaps),
+              width = 0.2, alpha = 0.2, size = 1, color = "gray70") +
+  # Używamy wyczyszczonych danych (df_post_d_clean)
+  geom_violin(data = df_post_d_clean, aes(x = Pair_status, y = val), 
+              fill = "gray95", color = "black", linewidth = 0.5, alpha = 0.5) +
   geom_errorbar(data = plot_dur_df, aes(x = status, ymin = low, ymax = high), 
-                width = 0.1, linewidth = 1.2, color = "black") +
+                width = 0.05, linewidth = 1, color = "black") +
   geom_point(data = plot_dur_df, aes(x = status, y = mu), 
-             size = 4, color = "black") +
-  scale_y_log10(labels = scales::label_number()) +
-  labs(title = "B)", x = "Pair Status", y = "Duration of neglect (s, log scale)") +
-  theme_bw(base_size = 12, base_family = "sans") +
-  theme(panel.grid = element_blank())
+             size = 3.5, color = "black") +
+  # Ustawienie limitów wewnątrz skali, by uniknąć wyrzucania punktów przez jitter
+  scale_y_log10(labels = scales::label_comma(), 
+                breaks = c(1, 100, 1000, 10000, 100000)) +
+  labs(title = "B) Neglect Duration", x = "Pair Status", y = "Duration (sec)") +
+  theme_classic(base_size = 12)
 
-# Final Assembly
+
+# Połączenie wykresów
 final <- p_freq + p_dur
 final
+
 ggsave(
   "Figure_4_pair_status_collapsed.png",
   final,
@@ -126,7 +178,7 @@ ggsave(
 # =========================================================
 
 # --- 3.1 Models (incubation1 only) ---
-D_sim <- D_all %>% filter(!is.na(Similarity_Index), session == "incubation1")
+D_sim <- D_all %>% filter(!is.na(Similarity_Index), session == "early")
 D_sim_nonzero <- D_sim %>% filter(sum_gaps > 0)
 
 m_sim_freq <- quap(
@@ -246,3 +298,5 @@ ggsave(
   height = 6,
   dpi = 600
 )
+
+
